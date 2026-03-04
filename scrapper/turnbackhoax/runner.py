@@ -1,0 +1,349 @@
+"""Async orchestrator — main scrape-and-download pipeline.
+
+Replaces the monolithic ``scrape_pages_and_download()`` from the original
+single-file script with a modular async implementation.
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import random
+import re
+from typing import Any, Dict, List, Optional
+
+from turnbackhoax.checkpoint import CheckpointState, load_checkpoint, save_checkpoint
+from turnbackhoax.config import ScrapeConfig
+from turnbackhoax.downloader import download_videos
+from turnbackhoax.exporter import write_extracted_videos, write_skipped_items, write_video_index
+from turnbackhoax.fetcher import FetchResult, fetch_many, fetch_page
+from turnbackhoax.parser import (
+    compile_keyword_patterns,
+    detect_video_urls,
+    extract_article_text_and_title,
+    find_article_links_from_listing,
+    match_keywords,
+)
+from turnbackhoax.prober import probe_video
+
+logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _batches(items: List[Any], size: int) -> List[List[Any]]:
+    """Yield successive *size*-length slices of *items*."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+async def _probe_in_executor(
+    url: str,
+    cookiefile: Optional[str] = None,
+    cookies_from_browser: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Run the (blocking) yt-dlp probe in a thread-pool executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: probe_video(
+            url,
+            cookiefile=cookiefile,
+            cookies_from_browser=cookies_from_browser,
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main pipeline
+# ---------------------------------------------------------------------------
+async def scrape_pages_and_download(config: ScrapeConfig) -> None:
+    """Async entry point for the full scrape-and-download pipeline.
+
+    1. Iterate listing pages
+    2. Fetch articles concurrently (batched by ``config.concurrency``)
+    3. Detect video URLs in each article
+    4. Probe each video with yt-dlp (in executor)
+    5. Checkpoint after every article
+    6. Export CSV indexes
+    7. Download videos with yt-dlp
+    """
+    # ── Load or create checkpoint ─────────────────────────────────────
+    ckpt_path = config.checkpoint_file or "checkpoint.json"
+    state: CheckpointState
+    if config.resume:
+        state = load_checkpoint(ckpt_path)
+    else:
+        state = CheckpointState()
+
+    # Cookie helpers
+    cookiefile = config.cookies if config.use_cookies else None
+    cookies_browser = config.cookies_from_browser if config.use_cookies_from_browser else None
+
+    if config.cookies and not config.confirm_cookies:
+        logger.warning(
+            "Cookies provided but --confirm-cookies not set.  "
+            "Cookies will NOT be used.  Pass --confirm-cookies to enable."
+        )
+
+    # ── Pre-compile keyword patterns ──────────────────────────────────
+    kw_patterns = compile_keyword_patterns(config.keywords, config.keyword_mode)
+
+    # ── Page loop ─────────────────────────────────────────────────────
+    for page in range(config.start_page, config.end_page + 1):
+        # Resume support: skip pages already fully processed
+        if config.resume and page < state.last_page:
+            logger.info("Skipping page %d (already checkpointed)", page)
+            continue
+
+        listing_url = f"{config.base_url}?page={page}&category={config.category}"
+        logger.info("Fetching listing page %d: %s", page, listing_url)
+
+        try:
+            listing_resp = await fetch_page(listing_url, config.fetcher_mode, config)
+        except Exception as exc:
+            logger.error("Failed to fetch listing page %d: %s", page, exc)
+            continue
+
+        if not listing_resp.ok:
+            logger.error(
+                "Listing page %d returned status %d — skipping",
+                page, listing_resp.status,
+            )
+            continue
+
+        article_links = find_article_links_from_listing(listing_resp, config.base_url)
+        logger.info("Found %d articles on page %d", len(article_links), page)
+
+        # ── Process articles in concurrent batches ────────────────────
+        for batch_start in range(0, len(article_links), config.concurrency):
+            batch = article_links[batch_start : batch_start + config.concurrency]
+            urls: List[str] = [str(info["url"]) for info in batch if info.get("url")]
+
+            # Filter out already-processed articles
+            fetch_indices: List[int] = []
+            fetch_urls: List[str] = []
+            for idx, url in enumerate(urls):
+                if state.is_article_processed(url):
+                    logger.debug("Skipping already-processed article: %s", url)
+                    continue
+                fetch_indices.append(idx)
+                fetch_urls.append(url)
+
+            if not fetch_urls:
+                continue
+
+            logger.info(
+                "  Fetching %d articles (batch %d..%d)",
+                len(fetch_urls),
+                batch_start + 1,
+                batch_start + len(batch),
+            )
+
+            responses = await fetch_many(
+                fetch_urls,
+                mode=config.fetcher_mode,
+                config=config,
+                concurrency=config.concurrency,
+                min_delay=config.min_delay_page,
+                max_delay=config.max_delay_page,
+            )
+
+            # ── Per-article processing ────────────────────────────────
+            for resp_idx, resp in enumerate(responses):
+                orig_idx = fetch_indices[resp_idx]
+                link_info = batch[orig_idx]
+                article_url: str = link_info.get("url") or ""
+                card_category = link_info.get("category")
+
+                if not resp.ok:
+                    logger.error(
+                        "    Failed to fetch article %s (status %d)",
+                        article_url, resp.status,
+                    )
+                    state.add_skipped({
+                        "article": article_url, "url": "",
+                        "reason": "fetch_error",
+                        "detail": f"HTTP {resp.status}",
+                        "category": card_category,
+                    })
+                    state.mark_article_processed(article_url)
+                    save_checkpoint(ckpt_path, state)
+                    continue
+
+                logger.info("  -> Processing article: %s", article_url)
+
+                # ── Keyword filtering ─────────────────────────────────
+                matched_keyword: Optional[str] = None
+                article_text = ""
+                article_title: Optional[str] = None
+
+                if kw_patterns:
+                    article_text, article_title = extract_article_text_and_title(resp)
+
+                    fields_to_check: List[str] = []
+                    if config.keyword_field in ("body", "both"):
+                        fields_to_check.append(article_text)
+                    if config.keyword_field in ("title", "both") and article_title:
+                        fields_to_check.append(article_title)
+
+                    matched_keyword = match_keywords(kw_patterns, fields_to_check)
+
+                    if not matched_keyword:
+                        logger.info("    Skipping article (no keyword match): %s", article_url)
+                        state.add_skipped({
+                            "article": article_url, "url": "",
+                            "reason": "keyword_no_match",
+                            "detail": "no matching keyword",
+                            "category": card_category,
+                        })
+                        state.mark_article_processed(article_url)
+                        save_checkpoint(ckpt_path, state)
+                        continue
+
+                # ── Detect video URLs ─────────────────────────────────
+                vids = detect_video_urls(resp, debug=config.debug)
+
+                if not vids:
+                    logger.info("    No video embeds/links found.")
+                    state.add_skipped({
+                        "article": article_url, "url": "",
+                        "reason": "no_video_found",
+                        "detail": "no embeds/links detected",
+                        "category": card_category,
+                    })
+                    state.mark_article_processed(article_url)
+                    save_checkpoint(ckpt_path, state)
+                    continue
+
+                logger.info("    Found %d video(s):", len(vids))
+
+                for vid_url in vids:
+                    logger.info("      %s", vid_url)
+
+                    # Deduplicate across entire run
+                    if any(v.get("url") == vid_url for v in state.found_videos):
+                        logger.debug("      (duplicate, skipping)")
+                        continue
+
+                    # ── Probe video ───────────────────────────────────
+                    probe = await _probe_in_executor(
+                        vid_url,
+                        cookiefile=cookiefile,
+                        cookies_from_browser=cookies_browser,
+                    )
+                    chosen = probe.get("recommended_format")
+                    video_title = probe.get("title") or ""
+                    logger.info(
+                        "      probe -> has_audio=%s recommended_format=%s "
+                        "title=%s error=%s",
+                        probe.get("has_audio"), chosen,
+                        video_title, probe.get("error"),
+                    )
+
+                    rec: Dict[str, Any] = {
+                        "url": vid_url,
+                        "chosen_format": chosen,
+                        "has_audio": probe.get("has_audio"),
+                        "title": video_title,
+                        "article": article_url,
+                        "category": card_category,
+                    }
+
+                    if probe.get("error"):
+                        rec["probe_error"] = probe["error"]
+                        state.add_skipped({
+                            "article": article_url,
+                            "url": vid_url,
+                            "reason": "probe_error",
+                            "detail": probe["error"],
+                            "matched_keyword": matched_keyword or "",
+                            "category": card_category,
+                        })
+
+                    if matched_keyword:
+                        rec["matched_keyword"] = matched_keyword
+                        if config.show_snippet and article_text:
+                            try:
+                                m = re.search(
+                                    r"(.{0,40}"
+                                    + re.escape(matched_keyword)
+                                    + r".{0,40})",
+                                    article_text,
+                                    re.IGNORECASE,
+                                )
+                                rec["snippet"] = m.group(0) if m else ""
+                            except Exception:
+                                rec["snippet"] = ""
+
+                    state.add_video(rec)
+
+                state.mark_article_processed(article_url)
+                save_checkpoint(ckpt_path, state)
+
+        # Update page progress
+        state.last_page = page
+        save_checkpoint(ckpt_path, state)
+
+    # ── Post-scrape: export and download ──────────────────────────────
+    if not state.found_videos:
+        logger.info("No video URLs found across pages.")
+        return
+
+    logger.info("Total unique video URLs found: %d", len(state.found_videos))
+
+    # Write CSVs
+    import os
+    os.makedirs(config.download_dir, exist_ok=True)
+    write_video_index(config.download_dir, state.found_videos)
+    write_extracted_videos(config.download_dir, state.found_videos)
+
+    # Filter before download
+    to_download: List[Dict[str, Any]] = []
+    for item in state.found_videos:
+        if item.get("probe_error"):
+            continue
+        if config.skip_no_audio and not item.get("has_audio"):
+            logger.info("Skipping (no audio): %s", item.get("url"))
+            state.add_skipped({
+                "article": item.get("article", ""),
+                "url": item.get("url", ""),
+                "reason": "no_audio",
+                "detail": "probed as no audio",
+                "matched_keyword": item.get("matched_keyword", ""),
+                "category": item.get("category", ""),
+            })
+            continue
+        to_download.append(item)
+
+    # Download (synchronous — yt-dlp is subprocess-based)
+    success_count = download_videos(
+        to_download,
+        download_dir=config.download_dir,
+        output_template=config.output_template,
+        cookies=config.cookies,
+        use_cookies=config.use_cookies,
+        min_delay=config.min_delay_dl,
+        max_delay=config.max_delay_dl,
+        dry_run=config.dry_run,
+        cookies_from_browser=config.cookies_from_browser,
+        use_cookies_from_browser=config.use_cookies_from_browser,
+    )
+
+    # Write skipped items
+    write_skipped_items(config.download_dir, state.skipped_items)
+
+    # Final checkpoint
+    save_checkpoint(ckpt_path, state)
+
+    # ── Summary report ────────────────────────────────────────────────
+    extracted = [v for v in state.found_videos if not v.get("probe_error")]
+    logger.info("=" * 60)
+    logger.info("SUMMARY")
+    logger.info("  Pages scraped       : %d", config.end_page - config.start_page + 1)
+    logger.info("  Videos found        : %d", len(state.found_videos))
+    logger.info("  Videos extracted    : %d (probe OK)", len(extracted))
+    logger.info("  Download attempted  : %d", len(to_download))
+    logger.info("  Download succeeded  : %d", success_count)
+    logger.info("  Download failed     : %d", len(to_download) - success_count)
+    logger.info("  Skipped items       : %d", len(state.skipped_items))
+    logger.info("=" * 60)

@@ -12,15 +12,39 @@ from typing import Any, Dict, Iterable, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Auth-error detection (shared pattern list with dfk_downloader.py)
+# ---------------------------------------------------------------------------
+AUTH_ERROR_PATTERNS = [
+    'login required',
+    'authentication',
+    'api is not granting access',
+    'http error 400',
+    'http error 401',
+    'http error 403',
+    'rate-limit',
+    'requested content is not available',
+    'members only',
+    'locked behind the login page',
+]
 
+
+def is_auth_error(error_msg: str) -> bool:
+    """Detect if a yt-dlp error is authentication/login related."""
+    error_lower = error_msg.lower()
+    return any(p in error_lower for p in AUTH_ERROR_PATTERNS)
+
+
+# ---------------------------------------------------------------------------
+# Command builder
+# ---------------------------------------------------------------------------
 def build_yt_dlp_cmd(
     url: str,
     download_dir: str,
     output_template: Optional[str],
     cookies: Optional[str],
-    use_cookies: bool,
     cookies_from_browser: Optional[str],
-    use_cookies_from_browser: bool,
+    chosen_format: Optional[str] = None,
 ) -> List[str]:
     """Build the ``yt-dlp`` CLI command list."""
     cmd = [sys.executable, "-m", "yt_dlp", url, "--no-playlist", "--retries", "10"]
@@ -32,14 +56,96 @@ def build_yt_dlp_cmd(
     elif output_template:
         cmd += ["-o", output_template]
 
-    if use_cookies and cookies:
+    if cookies:
         cmd += ["--cookies", cookies]
-    if use_cookies_from_browser and cookies_from_browser:
+    if cookies_from_browser:
         cmd += ["--cookies-from-browser", cookies_from_browser]
+
+    if chosen_format:
+        cmd += ["-f", chosen_format]
 
     return cmd
 
 
+# ---------------------------------------------------------------------------
+# Single-URL download (with smart cookie support)
+# ---------------------------------------------------------------------------
+def _download_one(
+    url: str,
+    download_dir: str,
+    output_template: Optional[str],
+    cookies: Optional[str],
+    cookies_from_browser: Optional[str],
+    chosen_format: Optional[str] = None,
+    smart_cookies: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Download a single URL, optionally using the smart-cookie strategy.
+
+    Returns a dict with keys ``success``, ``auth_used``, and optionally
+    ``error``.
+    """
+    if dry_run:
+        logger.info("Dry-run enabled; skipping actual download")
+        return {"success": True, "auth_used": False}
+
+    has_cookies = bool(cookies or cookies_from_browser)
+
+    # ------------------------------------------------------------------
+    # Smart-cookie path: try without cookies first
+    # ------------------------------------------------------------------
+    if smart_cookies and has_cookies:
+        cmd_no_auth = build_yt_dlp_cmd(
+            url, download_dir, output_template,
+            cookies=None, cookies_from_browser=None,
+            chosen_format=chosen_format,
+        )
+        logger.debug("Smart-cookies: trying without auth — %s", url[:80])
+        proc = subprocess.run(cmd_no_auth, capture_output=True, text=True)
+
+        if proc.returncode == 0:
+            return {"success": True, "auth_used": False}
+
+        error_msg = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
+
+        if is_auth_error(error_msg):
+            logger.info("  Auth error detected, retrying WITH cookies — %s", url[:80])
+            cmd_auth = build_yt_dlp_cmd(
+                url, download_dir, output_template,
+                cookies=cookies,
+                cookies_from_browser=cookies_from_browser,
+                chosen_format=chosen_format,
+            )
+            proc2 = subprocess.run(cmd_auth, capture_output=True, text=True)
+            if proc2.returncode == 0:
+                return {"success": True, "auth_used": True}
+            error_msg2 = proc2.stderr.strip() if proc2.stderr else f"Exit code {proc2.returncode}"
+            return {"success": False, "auth_used": True, "error": error_msg2}
+
+        # Non-auth error — cookies won't help
+        return {"success": False, "auth_used": False, "error": error_msg}
+
+    # ------------------------------------------------------------------
+    # Normal path: use cookies if provided
+    # ------------------------------------------------------------------
+    cmd = build_yt_dlp_cmd(
+        url, download_dir, output_template,
+        cookies=cookies if has_cookies else None,
+        cookies_from_browser=cookies_from_browser if has_cookies else None,
+        chosen_format=chosen_format,
+    )
+    logger.info("Running: %s", " ".join(shlex.quote(p) for p in cmd))
+
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode == 0:
+        return {"success": True, "auth_used": has_cookies}
+    error_msg = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
+    return {"success": False, "auth_used": has_cookies, "error": error_msg}
+
+
+# ---------------------------------------------------------------------------
+# Batch download
+# ---------------------------------------------------------------------------
 def download_videos(
     items: Iterable[Any],
     download_dir: str,
@@ -51,11 +157,16 @@ def download_videos(
     dry_run: bool = False,
     cookies_from_browser: Optional[str] = None,
     use_cookies_from_browser: bool = False,
+    smart_cookies: bool = True,
 ) -> int:
     """Download a list of video items using yt-dlp.
 
     *items*: Iterable of strings (URLs) or dicts with keys ``url`` and
     optional ``chosen_format``.
+
+    When *smart_cookies* is True and cookies are configured, each download
+    first attempts **without** cookies.  If that fails with an
+    authentication error the download is retried **with** cookies.
 
     Returns the number of successful downloads.
     """
@@ -71,31 +182,35 @@ def download_videos(
         else:
             continue
 
+    # Resolve effective cookie values
+    eff_cookies = cookies if use_cookies else None
+    eff_cookies_browser = cookies_from_browser if use_cookies_from_browser else None
+
     success_count = 0
     for i, entry in enumerate(normalised, start=1):
         url = entry["url"]
         fmt = entry.get("chosen_format")
         logger.info("[%d/%d] Downloading: %s", i, len(normalised), url)
-
-        cmd = build_yt_dlp_cmd(
-            url, download_dir, output_template, cookies, use_cookies,
-            cookies_from_browser, use_cookies_from_browser,
-        )
         if fmt:
-            cmd += ["-f", fmt]
             logger.info("  -> using format: %s", fmt)
 
-        logger.info("Running: %s", " ".join(shlex.quote(p) for p in cmd))
+        result = _download_one(
+            url,
+            download_dir=download_dir,
+            output_template=output_template,
+            cookies=eff_cookies,
+            cookies_from_browser=eff_cookies_browser,
+            chosen_format=fmt,
+            smart_cookies=smart_cookies,
+            dry_run=dry_run,
+        )
 
-        try:
-            if dry_run:
-                logger.info("Dry-run enabled; skipping actual download")
-                success_count += 1
-            else:
-                subprocess.check_call(cmd)
-                success_count += 1
-        except subprocess.CalledProcessError as exc:
-            logger.error("yt-dlp failed for %s: %s", url, exc)
+        if result["success"]:
+            auth_tag = " (with cookies)" if result.get("auth_used") else " (no cookies)"
+            logger.info("  ✓ Downloaded%s", auth_tag)
+            success_count += 1
+        else:
+            logger.error("  ✗ Failed: %s", result.get("error", "unknown"))
 
         # Delay between downloads (skip after last)
         if i < len(normalised):

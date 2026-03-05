@@ -327,6 +327,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
         dry_run=config.dry_run,
         cookies_from_browser=config.cookies_from_browser,
         use_cookies_from_browser=config.use_cookies_from_browser,
+        smart_cookies=config.smart_cookies,
     )
 
     # Write skipped items

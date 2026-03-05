@@ -58,6 +58,7 @@ class DownloadConfig:
     # Cookies
     cookies: Optional[str] = None
     cookies_from_browser: Optional[str] = None
+    smart_cookies: bool = True  # Try without cookies first, retry with cookies on auth error
     
     # Checkpoint
     checkpoint_file: str = "dfk_checkpoint.json"
@@ -202,7 +203,27 @@ def ensure_yt_dlp() -> None:
         subprocess.run([sys.executable, '-m', 'pip', 'install', 'yt-dlp'], check=True)
 
 
-async def download_url(
+AUTH_ERROR_PATTERNS = [
+    'login required',
+    'authentication',
+    'api is not granting access',
+    'http error 400',
+    'http error 401',
+    'http error 403',
+    'rate-limit',
+    'requested content is not available',
+    'members only',
+    'locked behind the login page',
+]
+
+
+def is_auth_error(error_msg: str) -> bool:
+    """Detect if a yt-dlp error is authentication/login related."""
+    error_lower = error_msg.lower()
+    return any(p in error_lower for p in AUTH_ERROR_PATTERNS)
+
+
+async def _run_ytdlp(
     url: str,
     download_dir: str,
     output_template: str,
@@ -210,63 +231,48 @@ async def download_url(
     cookies_from_browser: Optional[str] = None,
     max_retries: int = 3,
     retry_backoff: float = 2.0,
-    dry_run: bool = False,
 ) -> Dict[str, Any]:
-    """Download a single URL with yt-dlp (async wrapper).
-    
-    Returns dict with keys: success, url, error, output_path, title, etc.
+    """Low-level yt-dlp subprocess call with retry loop.
+
+    Returns dict with keys: success, url, error, output_path, attempt.
     """
     cmd = [sys.executable, '-m', 'yt_dlp', url, '--no-playlist']
-    
+
     # Restrict filenames (sanitize for Windows)
     cmd.append('--restrict-filenames')
-    
+
     # Output template
-    output_path = os.path.join(download_dir, output_template)
-    cmd.extend(['-o', output_path])
-    
+    out = os.path.join(download_dir, output_template)
+    cmd.extend(['-o', out])
+
     # Cookies
     if cookies:
         cmd.extend(['--cookies', cookies])
     if cookies_from_browser:
         cmd.extend(['--cookies-from-browser', cookies_from_browser])
-    
-    # Retries
+
+    # Retries (yt-dlp internal network retries)
     cmd.extend(['--retries', str(max_retries)])
-    
-    # Format selection (remove 'best' to let yt-dlp auto-select best merged format)
-    # cmd.extend(['-f', 'best'])
-    
-    # Get info
+
+    # Print final filepath after download
     cmd.extend(['--print', 'after_move:filepath'])
-    
-    if dry_run:
-        logging.info("[DRY-RUN] Would download: %s", url)
-        return {
-            'success': True,
-            'url': url,
-            'dry_run': True,
-            'output_path': None,
-        }
-    
-    # Run with retries
+
     for attempt in range(1, max_retries + 1):
         try:
             loop = asyncio.get_running_loop()
+            # Capture cmd in default arg to avoid late-binding closure issue
             proc = await loop.run_in_executor(
                 None,
-                lambda: subprocess.run(
-                    cmd,
+                lambda _cmd=cmd: subprocess.run(
+                    _cmd,
                     capture_output=True,
                     text=True,
                     timeout=300,  # 5 min timeout per download
                 )
             )
-            
+
             if proc.returncode == 0:
-                # Extract output path from stdout
                 output = proc.stdout.strip().split('\n')[-1] if proc.stdout else None
-                
                 return {
                     'success': True,
                     'url': url,
@@ -275,7 +281,7 @@ async def download_url(
                 }
             else:
                 error = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
-                
+
                 if attempt < max_retries:
                     wait = retry_backoff ** (attempt - 1)
                     logging.warning(
@@ -284,14 +290,13 @@ async def download_url(
                     )
                     await asyncio.sleep(wait)
                 else:
-                    logging.error("Download failed after %d attempts: %s", max_retries, error)
                     return {
                         'success': False,
                         'url': url,
                         'error': error,
                         'attempts': max_retries,
                     }
-        
+
         except subprocess.TimeoutExpired:
             if attempt < max_retries:
                 logging.warning("Download timeout (attempt %d/%d), retrying...", attempt, max_retries)
@@ -303,7 +308,7 @@ async def download_url(
                     'error': 'Download timeout after retries',
                     'attempts': max_retries,
                 }
-        
+
         except Exception as exc:
             logging.error("Download exception: %s", exc)
             return {
@@ -312,8 +317,87 @@ async def download_url(
                 'error': str(exc),
                 'attempts': attempt,
             }
-    
+
     return {'success': False, 'url': url, 'error': 'Unknown error'}
+
+
+async def download_url(
+    url: str,
+    download_dir: str,
+    output_template: str,
+    cookies: Optional[str] = None,
+    cookies_from_browser: Optional[str] = None,
+    smart_cookies: bool = True,
+    max_retries: int = 3,
+    retry_backoff: float = 2.0,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Download a single URL with yt-dlp.
+
+    When *smart_cookies* is True and cookies are configured, the function
+    first attempts the download **without** cookies.  If that attempt fails
+    with an authentication-related error it automatically retries **with**
+    cookies.  This avoids burning cookie sessions on content that is
+    publicly accessible.
+    """
+    if dry_run:
+        logging.info("[DRY-RUN] Would download: %s", url)
+        return {
+            'success': True,
+            'url': url,
+            'dry_run': True,
+            'output_path': None,
+        }
+
+    has_cookies = bool(cookies or cookies_from_browser)
+
+    # ------------------------------------------------------------------
+    # Smart-cookie path: try without cookies first
+    # ------------------------------------------------------------------
+    if smart_cookies and has_cookies:
+        logging.debug("Smart-cookies: trying without auth first — %s", url[:80])
+        result = await _run_ytdlp(
+            url, download_dir, output_template,
+            cookies=None, cookies_from_browser=None,
+            max_retries=1,        # single quick attempt
+            retry_backoff=retry_backoff,
+        )
+
+        if result.get('success'):
+            result['auth_used'] = False
+            return result
+
+        # Check whether the error looks like an auth / login issue
+        error_msg = result.get('error', '')
+        if is_auth_error(error_msg):
+            logging.info("Auth error detected, retrying WITH cookies — %s", url[:80])
+            result = await _run_ytdlp(
+                url, download_dir, output_template,
+                cookies=cookies,
+                cookies_from_browser=cookies_from_browser,
+                max_retries=max_retries,
+                retry_backoff=retry_backoff,
+            )
+            result['auth_used'] = True
+            return result
+
+        # Non-auth error (e.g. "no video in post", network error, etc.)
+        # No point retrying with cookies — return as-is.
+        result['auth_used'] = False
+        return result
+
+    # ------------------------------------------------------------------
+    # Normal path: always use cookies if provided (smart_cookies=False)
+    # ------------------------------------------------------------------
+    result = await _run_ytdlp(
+        url, download_dir, output_template,
+        cookies=cookies,
+        cookies_from_browser=cookies_from_browser,
+        max_retries=max_retries,
+        retry_backoff=retry_backoff,
+    )
+    result['auth_used'] = has_cookies
+    return result
 
 
 # ============================================================================
@@ -348,6 +432,7 @@ async def download_batch(
                 output_template=config.output_template,
                 cookies=config.cookies,
                 cookies_from_browser=config.cookies_from_browser,
+                smart_cookies=config.smart_cookies,
                 max_retries=config.max_retries,
                 retry_backoff=config.retry_backoff,
                 dry_run=config.dry_run,
@@ -363,7 +448,8 @@ async def download_batch(
             
             if result.get('success'):
                 state.downloaded.append(result)
-                logging.info("  ✓ Downloaded: %s", result.get('output_path', 'dry-run'))
+                auth_tag = " (with cookies)" if result.get('auth_used') else " (no cookies)"
+                logging.info("  ✓ Downloaded%s: %s", auth_tag, result.get('output_path', 'dry-run'))
             else:
                 state.failed.append(result)
                 logging.error("  ✗ Failed: %s", result.get('error'))
@@ -397,7 +483,7 @@ def export_results(download_dir: str, state: CheckpointState) -> None:
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             writer = csv.DictWriter(f, fieldnames=[
                 'row_num', 'url', 'platform', 'category', 'date',
-                'output_path', 'attempt',
+                'output_path', 'attempt', 'auth_used',
             ])
             writer.writeheader()
             for item in state.downloaded:
@@ -409,6 +495,7 @@ def export_results(download_dir: str, state: CheckpointState) -> None:
                     'date': item.get('date'),
                     'output_path': item.get('output_path'),
                     'attempt': item.get('attempt'),
+                    'auth_used': item.get('auth_used', ''),
                 })
         logging.info("Exported %d downloads to %s", len(state.downloaded), csv_path)
     
@@ -532,6 +619,8 @@ def main() -> None:
                         help='Netscape-format cookies file')
     parser.add_argument('--cookies-from-browser',
                         help='Import cookies from browser (e.g. chrome, firefox)')
+    parser.add_argument('--no-smart-cookies', action='store_true',
+                        help='Disable smart cookies (always send cookies on every request)')
     
     # Checkpoint
     parser.add_argument('--checkpoint-file', default='dfk_checkpoint.json',
@@ -570,6 +659,7 @@ def main() -> None:
         platforms=args.platforms,
         cookies=args.cookies,
         cookies_from_browser=args.cookies_from_browser,
+        smart_cookies=not args.no_smart_cookies,
         checkpoint_file=args.checkpoint_file,
         resume=args.resume,
         dry_run=args.dry_run,

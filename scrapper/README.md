@@ -132,34 +132,54 @@ python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
 ## Usage — dfk_downloader.py (CSV batch downloader)
 
 ```sh
-# Download first 10 URLs from CSV (default: Konten DFK Terverifikasi - Detail data recap.csv)
-python scrapper/dfk_downloader.py --max-urls 10
+# Download first 10 rows from CSV
+python scrapper/dfk_downloader.py --end-row 10
 
-# Download all Facebook and Twitter videos with 10 concurrent downloads
-python scrapper/dfk_downloader.py --platforms facebook twitter --concurrency 10
+# Download all Facebook and Twitter videos
+python scrapper/dfk_downloader.py --platforms facebook twitter
 
 # Dry run — check what would be downloaded without actually downloading
-python scrapper/dfk_downloader.py --max-urls 50 --dry-run
+python scrapper/dfk_downloader.py --end-row 50 --dry-run
 
 # Resume from previous checkpoint
 python scrapper/dfk_downloader.py --resume
 
+# With cookies (smart cookies enabled by default — tries without cookies first,
+# retries with cookies only on auth errors like Instagram login-required)
+python scrapper/dfk_downloader.py --cookies cookies.txt --resume
+
+# With browser cookie extraction (always fresh cookies from logged-in browser)
+python scrapper/dfk_downloader.py --cookies-from-browser chrome --resume
+
+# Disable smart cookies — always send cookies on every request
+python scrapper/dfk_downloader.py --cookies cookies.txt --no-smart-cookies --resume
+
+# Download only Instagram with longer delays to avoid rate limits
+python scrapper/dfk_downloader.py --platforms instagram --cookies cookies.txt \
+    --min-delay 3.0 --max-delay 8.0 --concurrency 2 --resume
+
 # Custom CSV file and output directory
-python scrapper/dfk_downloader.py --csv-path "my_urls.csv" --output-dir "my_downloads"
+python scrapper/dfk_downloader.py --csv-file "my_urls.csv" --download-dir "my_downloads"
 
-# Skip already downloaded videos (based on video ID)
-python scrapper/dfk_downloader.py --skip-existing
-
-# With custom checkpoint file and retry settings
-python scrapper/dfk_downloader.py --checkpoint-file "my_checkpoint.json" --max-retries 5
-
-# Download only TikTok videos with verbose logging
-python scrapper/dfk_downloader.py --platforms tiktok --log-level DEBUG
+# Download rows 100..200 with verbose logging
+python scrapper/dfk_downloader.py --start-row 100 --end-row 200 --log-level DEBUG
 ```
+
+### Smart cookies
+
+By default, `--cookies` and `--cookies-from-browser` use **smart cookie mode**:
+
+1. First attempt downloads **without** cookies (fast, no auth overhead)
+2. If yt-dlp returns an authentication error (login required, HTTP 400/401/403, rate-limit, etc.) the download is retried **with** cookies
+3. If the error is non-auth (e.g. "no video in this post", network timeout) cookies are not wasted
+
+This preserves cookie sessions for platforms that actually need them (Instagram, private Facebook) while keeping public content downloads (TikTok, YouTube) lightweight.
+
+Disable with `--no-smart-cookies` to always send cookies on every request.
 
 ### CSV format requirements
 
-The CSV must contain at least a `URL KONTEN` column (or customize with `--url-column`). Optional `PLATFORM` column for filtering. Example:
+The CSV must contain a `URL KONTEN` column. Optional `PLATFORM` column for filtering. Example:
 
 ```csv
 No,Tanggal,URL KONTEN,PLATFORM,KATEGORI
@@ -171,30 +191,33 @@ No,Tanggal,URL KONTEN,PLATFORM,KATEGORI
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--csv-path` | `Konten DFK Terverifikasi - Detail data recap.csv` | Path to CSV file with URLs |
-| `--output-dir` | `dfk_downloads` | Output directory for downloads |
-| `--url-column` | `URL KONTEN` | CSV column name containing URLs |
-| `--platform-column` | `PLATFORM` | CSV column name for platform filtering |
-| `--platforms` | all | Filter specific platforms (e.g., `facebook twitter`) |
-| `--max-urls` | unlimited | Limit number of URLs to process |
-| `--concurrency` | 5 | Max concurrent downloads |
-| `--checkpoint-file` | `<output-dir>/dfk_checkpoint.json` | Checkpoint file path |
-| `--resume` | false | Resume from checkpoint |
-| `--skip-existing` | false | Skip URLs already in checkpoint |
+| `--csv-file` | `Konten DFK Terverifikasi - Detail data recap.csv` | Path to CSV file with URLs |
+| `--download-dir` | `dfk_downloads` | Output directory for downloads |
+| `--output` | `[%(id)s] %(title).100B.%(ext)s` | yt-dlp output template (sanitized for Windows) |
+| `--start-row` | 1 | First row to process (1-indexed) |
+| `--end-row` | unlimited | Last row to process (inclusive) |
+| `--platforms` | all | Filter specific platforms (e.g., `facebook twitter instagram`) |
+| `--concurrency` | 3 | Max concurrent downloads |
+| `--min-delay` | 2.0 | Min delay between downloads (seconds) |
+| `--max-delay` | 5.0 | Max delay between downloads (seconds) |
 | `--max-retries` | 3 | Max retry attempts per URL |
+| `--retry-backoff` | 2.0 | Exponential backoff base for retries |
+| `--cookies` | — | Netscape-format cookies file |
+| `--cookies-from-browser` | — | Import cookies from browser (e.g., `chrome`, `firefox`) |
+| `--no-smart-cookies` | false | Disable smart cookies (always send cookies on every request) |
+| `--checkpoint-file` | `dfk_checkpoint.json` | Checkpoint file path |
+| `--resume` | false | Resume from checkpoint |
 | `--dry-run` | false | Check URLs without downloading |
 | `--log-level` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
-| `--cookies` | — | Netscape-format cookies file |
-| `--cookies-from-browser` | — | Import cookies from browser (e.g., `chrome`) |
 
 ### Output files — dfk_downloader.py
 
-After running, `<output-dir>/` contains:
-- `dfk_checkpoint.json` — resumable state with all processed URLs
-- `dfk_results.csv` — summary of all downloads (status, filename, error messages)
-- `dfk_downloaded.csv` — successfully downloaded videos only
+After running, `<download-dir>/` contains:
+- `dfk_downloaded.csv` — successfully downloaded videos (includes `auth_used` column showing whether cookies were needed)
 - `dfk_failed.csv` — failed downloads with error details
-- Downloaded video files with sanitized filenames: `[video_id] title.ext`
+- Downloaded media files with sanitized filenames: `[video_id] title.ext`
+
+Checkpoint file (default `dfk_checkpoint.json` in working directory) tracks all progress for resumability.
 
 ### Platform support
 
@@ -231,14 +254,15 @@ python scrapper/download_single_video.py <URL> --cookies cookies.txt
 
 ### dfk_downloader.py pipeline
 
-1. **CSV parsing** — reads URLs from specified column, normalizes platform names
+1. **CSV parsing** — reads URLs from `URL KONTEN` column, normalizes platform names
 2. **Platform filtering** — optionally processes only specific platforms (Facebook, Twitter, etc.)
-3. **Checkpoint loading** — skips already-processed URLs if `--resume` or `--skip-existing` is set
+3. **Checkpoint loading** — skips already-processed rows if `--resume` is set
 4. **Async batch processing** — downloads URLs concurrently with semaphore-based throttling
-5. **Retry logic** — exponential backoff for transient failures (network errors, rate limits)
-6. **Filename sanitization** — template `[%(id)s] %(title).100B.%(ext)s` with `--restrict-filenames` for Windows compatibility
-7. **Result tracking** — all URLs categorized as downloaded, failed (with error), or skipped
-8. **CSV export** — three result files (all, downloaded only, failed only) for easy analysis
+5. **Smart cookies** — tries without cookies first; retries with cookies only on auth errors (configurable via `--no-smart-cookies`)
+6. **Retry logic** — exponential backoff for transient failures (network errors, rate limits)
+7. **Filename sanitization** — template `[%(id)s] %(title).100B.%(ext)s` with `--restrict-filenames` for Windows compatibility
+8. **Result tracking** — all URLs categorized as downloaded or failed, with `auth_used` metadata
+9. **CSV export** — two result files (downloaded, failed) for easy analysis
 
 ## Output files
 

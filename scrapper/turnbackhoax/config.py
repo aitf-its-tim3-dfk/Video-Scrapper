@@ -30,6 +30,7 @@ class ScrapeConfig:
     cookies: Optional[str] = None
     confirm_cookies: bool = False
     cookies_from_browser: Optional[str] = None
+    smart_cookies: bool = True  # Try without cookies first, retry on auth error
 
     # --- Delays ---
     min_delay_page: float = 2.0
@@ -93,6 +94,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Require explicit confirmation to use cookies")
     p.add_argument("--cookies-from-browser",
                    help="Pass cookies from browser to yt-dlp (e.g. 'chrome', 'firefox')")
+    p.add_argument("--no-smart-cookies", action="store_true",
+                   help="Disable smart cookies (always send cookies on every request)")
 
     # Delays
     p.add_argument("--min-delay-page", type=float, default=2.0,
@@ -157,6 +160,7 @@ def parse_args(argv: Optional[List[str]] = None) -> ScrapeConfig:
         cookies=args.cookies,
         confirm_cookies=args.confirm_cookies,
         cookies_from_browser=args.cookies_from_browser,
+        smart_cookies=not args.no_smart_cookies,
         min_delay_page=args.min_delay_page,
         max_delay_page=args.max_delay_page,
         min_delay_dl=args.min_delay_dl,

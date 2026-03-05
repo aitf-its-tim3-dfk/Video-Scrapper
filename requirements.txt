@@ -20,3 +20,7 @@ msgspec>=0.20.0
 # Install playwright + chromium if you want --fetcher-mode dynamic or stealth:
 # pip install playwright && python -m playwright install chromium
 # playwright==1.56.0
+
+python -m yt_dlp --cookies cookies.txt \
+  "https://www.instagram.com/karindanashta/p/DOGcqOZk7gq/" \
+  -v --skip-download

@@ -300,11 +300,65 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                 state.mark_article_processed(article_url)
                 save_checkpoint(ckpt_path, state)
 
+        # ── Download videos from this page ────────────────────────────
+        # Get videos that were found in this page only (not yet downloaded)
+        page_videos: List[Dict[str, Any]] = []
+        for item in state.found_videos:
+            # Skip if already downloaded (has download_attempted flag)
+            if item.get("download_attempted"):
+                continue
+            # Skip if probe error
+            if item.get("probe_error"):
+                continue
+            # Skip if no audio (if configured)
+            if config.skip_no_audio and not item.get("has_audio"):
+                logger.info("Skipping (no audio): %s", item.get("url"))
+                state.add_skipped({
+                    "article": item.get("article", ""),
+                    "url": item.get("url", ""),
+                    "reason": "no_audio",
+                    "detail": "probed as no audio",
+                    "matched_keyword": item.get("matched_keyword", ""),
+                    "category": item.get("category", ""),
+                })
+                item["download_attempted"] = True
+                continue
+            page_videos.append(item)
+
+        # Download videos from this page
+        if page_videos:
+            logger.info("=" * 60)
+            logger.info("Downloading %d videos from page %d...", len(page_videos), page)
+            logger.info("=" * 60)
+            
+            page_success = download_videos(
+                page_videos,
+                download_dir=config.download_dir,
+                output_template=config.output_template,
+                cookies=config.cookies,
+                use_cookies=config.use_cookies,
+                min_delay=config.min_delay_dl,
+                max_delay=config.max_delay_dl,
+                dry_run=config.dry_run,
+                cookies_from_browser=config.cookies_from_browser,
+                use_cookies_from_browser=config.use_cookies_from_browser,
+                smart_cookies=config.smart_cookies,
+            )
+            
+            # Mark these videos as download attempted
+            for item in page_videos:
+                item["download_attempted"] = True
+            
+            logger.info("Page %d download complete: %d/%d succeeded", 
+                       page, page_success, len(page_videos))
+        else:
+            logger.info("No videos to download from page %d", page)
+
         # Update page progress
         state.last_page = page
         save_checkpoint(ckpt_path, state)
 
-    # ── Post-scrape: export and download ──────────────────────────────
+    # ── Post-scrape: export CSVs and final report ─────────────────────
     if not state.found_videos:
         logger.info("No video URLs found across pages.")
         return
@@ -316,44 +370,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
     os.makedirs(config.download_dir, exist_ok=True)
     write_video_index(config.download_dir, state.found_videos)
     write_extracted_videos(config.download_dir, state.found_videos)
-
-    # Filter before download
-    to_download: List[Dict[str, Any]] = []
-    for item in state.found_videos:
-        if item.get("probe_error"):
-            continue
-        if config.skip_no_audio and not item.get("has_audio"):
-            logger.info("Skipping (no audio): %s", item.get("url"))
-            state.add_skipped({
-                "article": item.get("article", ""),
-                "url": item.get("url", ""),
-                "reason": "no_audio",
-                "detail": "probed as no audio",
-                "matched_keyword": item.get("matched_keyword", ""),
-                "category": item.get("category", ""),
-            })
-            continue
-        to_download.append(item)
-
-    # Download (synchronous — yt-dlp is subprocess-based)
-    success_count = download_videos(
-        to_download,
-        download_dir=config.download_dir,
-        output_template=config.output_template,
-        cookies=config.cookies,
-        use_cookies=config.use_cookies,
-        min_delay=config.min_delay_dl,
-        max_delay=config.max_delay_dl,
-        dry_run=config.dry_run,
-        cookies_from_browser=config.cookies_from_browser,
-        use_cookies_from_browser=config.use_cookies_from_browser,
-        smart_cookies=config.smart_cookies,
-    )
-
-    # Write skipped items
     write_skipped_items(config.download_dir, state.skipped_items)
-    
-    # Write downloaded videos (only files that physically exist)
     write_downloaded_videos(config.download_dir, state.found_videos)
 
     # Final checkpoint
@@ -361,13 +378,12 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
 
     # ── Summary report ────────────────────────────────────────────────
     extracted = [v for v in state.found_videos if not v.get("probe_error")]
+    downloaded = [v for v in state.found_videos if v.get("download_attempted") and not v.get("probe_error")]
     logger.info("=" * 60)
     logger.info("SUMMARY")
     logger.info("  Pages scraped       : %d", config.end_page - config.start_page + 1)
     logger.info("  Videos found        : %d", len(state.found_videos))
     logger.info("  Videos extracted    : %d (probe OK)", len(extracted))
-    logger.info("  Download attempted  : %d", len(to_download))
-    logger.info("  Download succeeded  : %d", success_count)
-    logger.info("  Download failed     : %d", len(to_download) - success_count)
+    logger.info("  Videos downloaded   : %d", len(downloaded))
     logger.info("  Skipped items       : %d", len(state.skipped_items))
     logger.info("=" * 60)

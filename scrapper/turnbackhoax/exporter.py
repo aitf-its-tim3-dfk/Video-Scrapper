@@ -134,3 +134,67 @@ def write_skipped_items(
     ]
     _write_csv(path, SKIPPED_CSV_HEADER, rows)
     return path
+
+
+def write_downloaded_videos(
+    download_dir: str,
+    videos: List[Dict[str, Any]],
+    filename: str = "downloaded_videos.csv",
+) -> str:
+    """Write CSV with only videos that physically exist in the download directory.
+    
+    This function verifies that the video file actually exists on disk before
+    including it in the CSV output.
+    
+    Returns the output path.
+    """
+    # Filter videos that have a title (filename) and the file actually exists
+    downloaded = []
+    for v in videos:
+        video_name = v.get("title")
+        if not video_name:
+            continue
+        
+        # Check if the video file exists in the download directory
+        video_path = os.path.join(download_dir, video_name)
+        if os.path.isfile(video_path):
+            # Verify it's actually a video file by checking extension
+            ext = os.path.splitext(video_name)[1].lower()
+            if ext in [".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".ts"]:
+                downloaded.append(v)
+            else:
+                logger.debug("Skipping non-video file: %s", video_name)
+        else:
+            logger.debug("Video file not found on disk: %s", video_path)
+    
+    if not downloaded:
+        logger.info("No downloaded videos found in directory.")
+        return ""
+    
+    path = os.path.join(download_dir, filename)
+    rows = [
+        [
+            i,
+            item.get("title") or "",
+            item.get("article", ""),
+            item.get("article_title", ""),
+            item.get("url", ""),
+            bool(item.get("has_audio")),
+            item.get("category", ""),
+            item.get("matched_keyword", ""),
+            item.get("snippet", ""),
+            item.get("date", ""),
+            item.get("author", ""),
+            item.get("image_url", ""),
+            item.get("narasi", ""),
+            item.get("penjelasan", ""),
+            item.get("kesimpulan", ""),
+            item.get("factcheck_result", ""),
+            item.get("factcheck_source", ""),
+            "; ".join(item.get("references", [])) if item.get("references") else "",
+        ]
+        for i, item in enumerate(downloaded, start=1)
+    ]
+    _write_csv(path, VIDEO_CSV_HEADER, rows)
+    logger.info("Found %d videos physically present in %s", len(downloaded), download_dir)
+    return path

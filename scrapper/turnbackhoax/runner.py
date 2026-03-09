@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from turnbackhoax.checkpoint import CheckpointState, load_checkpoint, save_checkpoint
 from turnbackhoax.config import ScrapeConfig
 from turnbackhoax.downloader import download_videos
-from turnbackhoax.exporter import write_extracted_videos, write_skipped_items, write_video_index
+from turnbackhoax.exporter import write_downloaded_videos, write_extracted_videos, write_skipped_items, write_video_index
 from turnbackhoax.fetcher import FetchResult, fetch_many, fetch_page
 from turnbackhoax.parser import (
     compile_keyword_patterns,
@@ -352,6 +352,9 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
 
     # Write skipped items
     write_skipped_items(config.download_dir, state.skipped_items)
+    
+    # Write downloaded videos (only files that physically exist)
+    write_downloaded_videos(config.download_dir, state.found_videos)
 
     # Final checkpoint
     save_checkpoint(ckpt_path, state)

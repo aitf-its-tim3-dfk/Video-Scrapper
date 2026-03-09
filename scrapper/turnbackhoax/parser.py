@@ -317,9 +317,23 @@ def _is_probable_video_url(url: str, debug: bool = False) -> bool:
             logger.debug("    Rejected Facebook URL (not a video): %s", url)
         return False
 
+    # TikTok — only actual video URLs, NOT hashtag/tag/trending pages
+    if "tiktok.com" in netloc:
+        # Reject hashtag/tag/trending/explore pages
+        if any(x in path for x in ("/tag/", "/hashtag/", "/trending", "/explore", "/discover")):
+            if debug:
+                logger.debug("    Rejected TikTok URL (hashtag/tag page): %s", url)
+            return False
+        # Accept video URLs (must contain /video/)
+        if "/video/" in path or "/@" in path:
+            return True
+        if debug:
+            logger.debug("    Rejected TikTok URL (not a video): %s", url)
+        return False
+
     # Common video hosts
     hosts = (
-        "youtube.com", "youtu.be", "tiktok.com", "vimeo.com",
+        "youtube.com", "youtu.be", "vimeo.com",
         "dailymotion.com", "x.com", "twitter.com",
     )
     if any(h in netloc for h in hosts):

@@ -65,6 +65,128 @@ def find_article_links_from_listing(response: Any, base_url: str) -> List[Dict[s
 
 
 # ---------------------------------------------------------------------------
+# Article metadata extraction
+# ---------------------------------------------------------------------------
+def extract_article_metadata(response: Any) -> Dict[str, Any]:
+    """Extract comprehensive metadata from a TurnBackHoax article page.
+    
+    Returns a dict with keys:
+        - title: str
+        - date: str (format: DD/MM/YYYY or ISO)
+        - category: str
+        - author: str
+        - image_url: str
+        - narasi: str (full HTML/text)
+        - penjelasan: str (full HTML/text)
+        - kesimpulan: str
+        - factcheck_result: str (e.g., "Salah", "Benar", etc.)
+        - factcheck_source: str
+        - references: List[str] (list of reference URLs)
+    """
+    metadata: Dict[str, Any] = {
+        "title": None,
+        "date": None,
+        "category": None,
+        "author": None,
+        "image_url": None,
+        "narasi": None,
+        "penjelasan": None,
+        "kesimpulan": None,
+        "factcheck_result": None,
+        "factcheck_source": None,
+        "references": [],
+    }
+    
+    # Extract title from h1
+    h1_els = response.css("h1")
+    if h1_els:
+        metadata["title"] = _get_text(h1_els[0])
+    
+    # Extract date from <time> tag
+    time_els = response.css("time[datetime]")
+    if time_els:
+        # Try datetime attribute first (ISO format)
+        datetime_val = _get_attr(time_els[0], "datetime")
+        if datetime_val:
+            metadata["date"] = datetime_val
+        else:
+            # Fallback to visible text
+            metadata["date"] = _get_text(time_els[0])
+    
+    # Extract category from article metadata section
+    cat_links = response.css("p a.text-light-blue")
+    if cat_links:
+        metadata["category"] = _get_text(cat_links[0])
+    
+    # Extract author (usually "Mafindo" in the same paragraph as date)
+    # Look for <span> after <time> in the same <p>
+    author_spans = response.css("article p span")
+    for span in author_spans:
+        text = _get_text(span)
+        if text and text not in ["Politik", "Kesehatan", "Teknologi"]:  # Skip categories
+            # Check if it's not a date
+            if not re.match(r"\d{2}/\d{2}/\d{4}", text):
+                metadata["author"] = text
+                break
+    
+    # Extract header image
+    fig_imgs = response.css("figure img")
+    if fig_imgs:
+        metadata["image_url"] = _get_attr(fig_imgs[0], "src")
+    
+    # Extract Narasi (article-origin section)
+    narasi_section = response.css("section.article-origin")
+    if narasi_section:
+        # Get the quoted div
+        quoted_divs = narasi_section[0].css(".quoted")
+        if quoted_divs:
+            # Get text content (strip HTML for cleaner output)
+            narasi_text = _get_text(quoted_divs[0])
+            metadata["narasi"] = narasi_text.strip() if narasi_text else None
+    
+    # Extract Penjelasan (article-explanation section)
+    penjelasan_sections = response.css("section.article-explanation")
+    for section in penjelasan_sections:
+        # Check the header
+        strong_els = section.css("strong")
+        if strong_els:
+            header = _get_text(strong_els[0])
+            if "Penjelasan" in header:
+                # Get the content div after the strong tag
+                content_divs = section.css("div")
+                if content_divs:
+                    penjelasan_text = _get_text(content_divs[0])
+                    metadata["penjelasan"] = penjelasan_text.strip() if penjelasan_text else None
+            elif "Kesimpulan" in header:
+                # Get the content div after the strong tag
+                content_divs = section.css("div")
+                if content_divs:
+                    kesimpulan_text = _get_text(content_divs[0])
+                    metadata["kesimpulan"] = kesimpulan_text.strip() if kesimpulan_text else None
+    
+    # Extract Factcheck Result (article-factcheck section)
+    factcheck_section = response.css("section.article-factcheck")
+    if factcheck_section:
+        # Get the rating (e.g., "Salah", "Benar")
+        result_spans = factcheck_section[0].css("span.factcheck-result")
+        if result_spans:
+            metadata["factcheck_result"] = _get_text(result_spans[0])
+        
+        # Get the source
+        source_spans = factcheck_section[0].css("span.factcheck-source a")
+        if source_spans:
+            metadata["factcheck_source"] = _get_attr(source_spans[0], "href")
+    
+    # Extract References (article-references section)
+    ref_section = response.css("section.article-references")
+    if ref_section:
+        ref_links = ref_section[0].css("li a")
+        metadata["references"] = [_get_attr(a, "href") for a in ref_links if _get_attr(a, "href")]
+    
+    return metadata
+
+
+# ---------------------------------------------------------------------------
 # Video URL detection from an article page
 # ---------------------------------------------------------------------------
 def detect_video_urls(response: Any, debug: bool = False) -> Set[str]:
@@ -185,11 +307,11 @@ def _is_probable_video_url(url: str, debug: bool = False) -> bool:
             logger.debug("    Rejected Instagram URL (not a post/reel/tv): %s", url)
         return False
 
-    # Facebook — only video paths
+    # Facebook — video paths including Reels and share links
     if "facebook.com" in netloc or "fb.watch" in netloc:
         if "fb.watch" in netloc:
             return True
-        if any(x in path for x in ("/video", "/videos", "/watch", "/video.php")):
+        if any(x in path for x in ("/video", "/videos", "/watch", "/video.php", "/share/r/", "/share/v/", "/reel", "/reels")):
             return True
         if debug:
             logger.debug("    Rejected Facebook URL (not a video): %s", url)
@@ -262,11 +384,28 @@ def _get_attr(element: Any, name: str) -> Optional[str]:
 
 def _get_text(element: Any) -> str:
     """Safely extract text content from a Scrapling Selector element."""
+    # Try get_all_text method first (most reliable for Scrapling)
+    fn = getattr(element, "get_all_text", None)
+    if fn and callable(fn):
+        try:
+            result = fn(strip=True)
+            if result:
+                return str(result)
+        except Exception:
+            pass
+    
+    # Fallback to text property
     text = getattr(element, "text", None)
     if text is not None:
         return str(text).strip()
-    # fallback: get_all_text
-    fn = getattr(element, "get_all_text", None)
-    if fn:
-        return fn(strip=True) or ""
+    
     return ""
+
+
+def _get_inner_html(element: Any) -> str:
+    """Extract inner HTML from a Scrapling Selector element."""
+    # Try to get the raw HTML
+    if hasattr(element, "html"):
+        return str(element.html)
+    # Fallback to text
+    return _get_text(element)

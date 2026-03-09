@@ -10,8 +10,10 @@ logger = logging.getLogger(__name__)
 
 # Shared header for video CSV files
 VIDEO_CSV_HEADER = [
-    "no", "video_name", "link_article", "link_video_asli",
+    "no", "video_name", "link_article", "article_title", "link_video_asli",
     "has_audio", "category", "matched_keyword", "snippet",
+    "date", "author", "image_url", "narasi", "penjelasan", 
+    "kesimpulan", "factcheck_result", "factcheck_source", "references",
 ]
 
 SKIPPED_CSV_HEADER = [
@@ -48,11 +50,21 @@ def write_video_index(
             i,
             item.get("title") or "",
             item.get("article", ""),
+            item.get("article_title", ""),
             item.get("url", ""),
             bool(item.get("has_audio")),
             item.get("category", ""),
             item.get("matched_keyword", ""),
             item.get("snippet", ""),
+            item.get("date", ""),
+            item.get("author", ""),
+            item.get("image_url", ""),
+            item.get("narasi", ""),
+            item.get("penjelasan", ""),
+            item.get("kesimpulan", ""),
+            item.get("factcheck_result", ""),
+            item.get("factcheck_source", ""),
+            "; ".join(item.get("references", [])) if item.get("references") else "",
         ]
         for i, item in enumerate(videos, start=1)
     ]
@@ -76,11 +88,21 @@ def write_extracted_videos(
             i,
             item.get("title") or "",
             item.get("article", ""),
+            item.get("article_title", ""),
             item.get("url", ""),
             bool(item.get("has_audio")),
             item.get("category", ""),
             item.get("matched_keyword", ""),
             item.get("snippet", ""),
+            item.get("date", ""),
+            item.get("author", ""),
+            item.get("image_url", ""),
+            item.get("narasi", ""),
+            item.get("penjelasan", ""),
+            item.get("kesimpulan", ""),
+            item.get("factcheck_result", ""),
+            item.get("factcheck_source", ""),
+            "; ".join(item.get("references", [])) if item.get("references") else "",
         ]
         for i, item in enumerate(extracted, start=1)
     ]

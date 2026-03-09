@@ -19,6 +19,7 @@ from turnbackhoax.fetcher import FetchResult, fetch_many, fetch_page
 from turnbackhoax.parser import (
     compile_keyword_patterns,
     detect_video_urls,
+    extract_article_metadata,
     extract_article_text_and_title,
     find_article_links_from_listing,
     match_keywords,
@@ -215,6 +216,14 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                     save_checkpoint(ckpt_path, state)
                     continue
 
+                # ── Extract article metadata ─────────────────────────────
+                logger.info("    Extracting article metadata...")
+                article_metadata = extract_article_metadata(resp)
+                logger.debug("    Extracted: date=%s, author=%s, factcheck=%s",
+                            article_metadata.get("date"),
+                            article_metadata.get("author"),
+                            article_metadata.get("factcheck_result"))
+
                 logger.info("    Found %d video(s):", len(vids))
 
                 for vid_url in vids:
@@ -247,6 +256,17 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         "title": video_title,
                         "article": article_url,
                         "category": card_category,
+                        # Add article metadata
+                        "article_title": article_metadata.get("title"),
+                        "date": article_metadata.get("date"),
+                        "author": article_metadata.get("author"),
+                        "image_url": article_metadata.get("image_url"),
+                        "narasi": article_metadata.get("narasi"),
+                        "penjelasan": article_metadata.get("penjelasan"),
+                        "kesimpulan": article_metadata.get("kesimpulan"),
+                        "factcheck_result": article_metadata.get("factcheck_result"),
+                        "factcheck_source": article_metadata.get("factcheck_source"),
+                        "references": article_metadata.get("references", []),
                     }
 
                     if probe.get("error"):

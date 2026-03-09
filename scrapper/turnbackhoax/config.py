@@ -19,7 +19,7 @@ class ScrapeConfig:
     # --- Pagination ---
     start_page: int = 1
     end_page: int = 1
-    category: str = "politik"
+    category: str = "all"
     base_url: str = DEFAULT_BASE_LISTING_URL
 
     # --- Output ---
@@ -80,7 +80,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Pagination
     p.add_argument("--start-page", type=int, default=1)
     p.add_argument("--end-page", type=int, default=1)
-    p.add_argument("--category", default="politik")
+    p.add_argument("--category", default="all")
     p.add_argument("--base-url", default=DEFAULT_BASE_LISTING_URL,
                    help="Base listing URL (used to build page links)")
 

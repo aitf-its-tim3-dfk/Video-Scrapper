@@ -35,6 +35,17 @@ def is_auth_error(error_msg: str) -> bool:
     return any(p in error_lower for p in AUTH_ERROR_PATTERNS)
 
 
+def is_format_error(error_msg: str) -> bool:
+    """Detect if error is about format selection/availability."""
+    error_lower = error_msg.lower()
+    return any(p in error_lower for p in [
+        'requested format is not available',
+        'format not available',
+        'no video formats found',
+        'unable to extract video data',
+    ])
+
+
 # ---------------------------------------------------------------------------
 # Command builder
 # ---------------------------------------------------------------------------
@@ -48,10 +59,14 @@ def build_yt_dlp_cmd(
 ) -> List[str]:
     """Build the ``yt-dlp`` CLI command list."""
     cmd = [sys.executable, "-m", "yt_dlp", url, "--no-playlist", "--retries", "10"]
+    
+    # Restrict filenames for Windows compatibility
+    cmd.append("--restrict-filenames")
 
     if download_dir:
         os.makedirs(download_dir, exist_ok=True)
-        outtmpl = output_template or "%(title)s.%(ext)s"
+        # Limit title length to 100 chars (use .100B for bytes, safer for Unicode)
+        outtmpl = output_template or "%(title).100B.%(ext)s"
         cmd += ["-o", os.path.join(download_dir, outtmpl)]
     elif output_template:
         cmd += ["-o", output_template]
@@ -108,6 +123,7 @@ def _download_one(
 
         error_msg = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
 
+        # Check for auth errors
         if is_auth_error(error_msg):
             logger.info("  Auth error detected, retrying WITH cookies — %s", url[:80])
             cmd_auth = build_yt_dlp_cmd(
@@ -120,9 +136,37 @@ def _download_one(
             if proc2.returncode == 0:
                 return {"success": True, "auth_used": True}
             error_msg2 = proc2.stderr.strip() if proc2.stderr else f"Exit code {proc2.returncode}"
+            
+            # Check if format error when using cookies
+            if chosen_format and is_format_error(error_msg2):
+                logger.info("  Format error with cookies, retrying without format selector — %s", url[:80])
+                cmd_no_fmt = build_yt_dlp_cmd(
+                    url, download_dir, output_template,
+                    cookies=cookies,
+                    cookies_from_browser=cookies_from_browser,
+                    chosen_format=None,  # Let yt-dlp auto-select
+                )
+                proc3 = subprocess.run(cmd_no_fmt, capture_output=True, text=True)
+                if proc3.returncode == 0:
+                    return {"success": True, "auth_used": True}
+                error_msg2 = proc3.stderr.strip() if proc3.stderr else f"Exit code {proc3.returncode}"
+            
             return {"success": False, "auth_used": True, "error": error_msg2}
 
-        # Non-auth error — cookies won't help
+        # Check for format errors (non-auth)
+        if chosen_format and is_format_error(error_msg):
+            logger.info("  Format error detected, retrying without format selector — %s", url[:80])
+            cmd_no_fmt = build_yt_dlp_cmd(
+                url, download_dir, output_template,
+                cookies=None, cookies_from_browser=None,
+                chosen_format=None,  # Let yt-dlp auto-select
+            )
+            proc2 = subprocess.run(cmd_no_fmt, capture_output=True, text=True)
+            if proc2.returncode == 0:
+                return {"success": True, "auth_used": False}
+            error_msg = proc2.stderr.strip() if proc2.stderr else f"Exit code {proc2.returncode}"
+
+        # Non-auth, non-format error — cookies won't help
         return {"success": False, "auth_used": False, "error": error_msg}
 
     # ------------------------------------------------------------------
@@ -139,7 +183,23 @@ def _download_one(
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode == 0:
         return {"success": True, "auth_used": has_cookies}
+    
     error_msg = proc.stderr.strip() if proc.stderr else f"Exit code {proc.returncode}"
+    
+    # Check for format error in normal path
+    if chosen_format and is_format_error(error_msg):
+        logger.info("  Format error detected, retrying without format selector — %s", url[:80])
+        cmd_no_fmt = build_yt_dlp_cmd(
+            url, download_dir, output_template,
+            cookies=cookies if has_cookies else None,
+            cookies_from_browser=cookies_from_browser if has_cookies else None,
+            chosen_format=None,  # Let yt-dlp auto-select
+        )
+        proc2 = subprocess.run(cmd_no_fmt, capture_output=True, text=True)
+        if proc2.returncode == 0:
+            return {"success": True, "auth_used": has_cookies}
+        error_msg = proc2.stderr.strip() if proc2.stderr else f"Exit code {proc2.returncode}"
+    
     return {"success": False, "auth_used": has_cookies, "error": error_msg}
 
 

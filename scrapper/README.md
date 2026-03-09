@@ -47,7 +47,12 @@ scrapper/
 - **Resumable** — JSON checkpoint files track progress; `--resume` picks up where you left off
 - **Keyword filtering** — whole-word or substring matching on article body/title
 - **Video probing** — yt-dlp detects formats, audio presence, and recommends best format
+- **Smart cookies** — tries without cookies first; retries with cookies only on auth errors (preserves cookie sessions)
+- **Format fallback** — auto-retries without format selector when specific formats aren't available (fixes YouTube Shorts)
+- **Windows-compatible filenames** — sanitized filenames with length limits (100 chars) for cross-platform compatibility
+- **Rich metadata extraction** — extracts date, author, narasi, penjelasan, kesimpulan, factcheck results, and references from each article
 - **Dry-run mode** — `--dry-run` does everything except actual downloads
+
 
 ## Quick requirements
 
@@ -89,13 +94,17 @@ python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 5 \
 python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 1 \
     --fetcher-mode stealth
 
-# With cookies for authenticated downloads
+# With cookies for authenticated downloads (smart cookies enabled by default)
 python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
     --cookies cookies.txt --confirm-cookies
 
-# Pass cookies from browser
+# Pass cookies from browser (always fresh cookies from logged-in browser)
 python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
     --cookies-from-browser chrome
+
+# Disable smart cookies — always send cookies on every request
+python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
+    --cookies cookies.txt --confirm-cookies --no-smart-cookies
 ```
 
 ## CLI flags
@@ -111,6 +120,7 @@ python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
 | `--cookies` | — | Netscape-format cookies file |
 | `--confirm-cookies` | false | Must be set to actually use `--cookies` |
 | `--cookies-from-browser` | — | Import cookies from browser (e.g. `chrome`) |
+| `--no-smart-cookies` | false | Disable smart cookies (always send cookies on every request) |
 | `--fetcher-mode` | `http` | `http`, `dynamic`, or `stealth` |
 | `--concurrency` | 5 | Max concurrent article fetches |
 | `--user-agent` | default | Custom User-Agent string |
@@ -128,6 +138,18 @@ python scrapper/scrape_and_download_videos.py --start-page 1 --end-page 2 \
 | `--max-delay-page` | 4.0 | Max delay between article fetches |
 | `--min-delay-dl` | 5.0 | Min delay between downloads |
 | `--max-delay-dl` | 10.0 | Max delay between downloads |
+
+### Smart cookies — scrape_and_download_videos.py
+
+By default, `--cookies` and `--cookies-from-browser` use **smart cookie mode**:
+
+1. First attempt downloads **without** cookies (fast, no auth overhead)
+2. If yt-dlp returns an authentication error (login required, HTTP 400/401/403, rate-limit, etc.) the download is retried **with** cookies
+3. If the error is non-auth (e.g. "no video in this post", network timeout) cookies are not wasted
+
+This preserves cookie sessions for platforms that actually need them (Instagram, private Facebook) while keeping public content downloads (TikTok, YouTube) lightweight.
+
+Disable with `--no-smart-cookies` to always send cookies on every request.
 
 ## Usage — dfk_downloader.py (CSV batch downloader)
 
@@ -246,11 +268,15 @@ python scrapper/download_single_video.py <URL> --cookies cookies.txt
 2. **Article cards** are identified by `.news-card-h-alt` CSS class; links resolved relative to base URL
 3. **Articles** are fetched concurrently in batches (controlled by `--concurrency`)
 4. **Keyword filtering** (optional) — articles not matching any keyword are skipped
-5. **Video detection** — each article is scanned for video URLs in iframes, anchors, and plaintext
+5. **Video detection** — each article is scanned for video URLs (Facebook `/share/r/`, `/reel`, Instagram, TikTok, YouTube, etc.)
 6. **Probing** — `yt-dlp --skip-download --dump-json` detects formats and audio presence
 7. **Checkpointing** — progress saved to JSON after every article
 8. **CSV export** — `video_index.csv`, `extracted_videos.csv`, `skipped_items.csv`
-9. **Downloading** — yt-dlp downloads with randomized delays between items
+9. **Downloading** — yt-dlp downloads with:
+   - **Smart cookies** — tries without cookies first; retries with cookies only on auth errors
+   - **Format fallback** — retries without format selector if requested format unavailable (fixes YouTube Shorts)
+   - **Filename sanitization** — `--restrict-filenames` + 100-char title limit for Windows compatibility
+   - Randomized delays between downloads
 
 ### dfk_downloader.py pipeline
 
@@ -268,10 +294,36 @@ python scrapper/download_single_video.py <URL> --cookies cookies.txt
 
 After a run, `<download-dir>/` contains:
 - `checkpoint.json` — resumable state
-- `video_index.csv` — all detected videos (including probe failures)
-- `extracted_videos.csv` — successfully probed videos
+- `video_index.csv` — all detected videos (including probe failures) **with full metadata**
+- `extracted_videos.csv` — successfully probed videos **with full metadata**
 - `skipped_items.csv` — articles/videos that were skipped (with reasons)
 - Downloaded video files
+
+### CSV Columns (video_index.csv & extracted_videos.csv)
+
+The CSV files now include comprehensive article metadata:
+
+| Column | Description |
+|--------|-------------|
+| `no` | Sequential number |
+| `video_name` | Video title from yt-dlp |
+| `link_article` | TurnBackHoax article URL |
+| `link_video_asli` | Original video URL (Facebook, Instagram, TikTok, etc.) |
+| `has_audio` | Boolean: video has audio track |
+| `category` | Article category (Politik, Kesehatan, etc.) |
+| `matched_keyword` | Keyword that matched (if keyword filtering used) |
+| `snippet` | Text snippet around matched keyword |
+| **`date`** | Article publication date (YYYY-MM-DD) |
+| **`author`** | Author/source (usually "Mafindo") |
+| **`image_url`** | Header image URL |
+| **`narasi`** | Full narasi text (viral content description) |
+| **`penjelasan`** | Full penjelasan text (fact-check explanation) |
+| **`kesimpulan`** | Conclusion text (final verdict summary) |
+| **`factcheck_result`** | Fact-check label: "Salah", "Benar", "Menyesatkan", etc. |
+| **`factcheck_source`** | Source URL of checked content |
+| **`references`** | Supporting references (URLs separated by `;`) |
+
+**Bold fields** are newly added metadata extracted from article pages.
 
 ## Safety & etiquette
 

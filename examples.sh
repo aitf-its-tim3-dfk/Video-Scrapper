@@ -34,7 +34,7 @@ echo ""
 echo -e "${YELLOW}3. TURNBACKHOAX — Download specific pages${NC}"
 echo "   python -m turnbackhoax.cli --start-page 1 --end-page 3 --download-dir ./videos"
 echo ""
-
+python -m /scrapper/turnbackhoax.cli --start-page 1 --end-page 3 --download-dir ./videos
 echo -e "${YELLOW}4. TURNBACKHOAX — Keyword filtering${NC}"
 echo "   # Find only articles about 'hoaks' (substring match)"
 echo "   python -m turnbackhoax.cli \\

@@ -15,6 +15,7 @@ anyio>=4.12.1
 browserforge>=1.2.4
 patchright>=1.56.0
 msgspec>=0.20.0
+playwright
 
 # Scrapling browser fetchers (DynamicFetcher / StealthyFetcher) — optional runtime
 # Install playwright + chromium if you want --fetcher-mode dynamic or stealth:

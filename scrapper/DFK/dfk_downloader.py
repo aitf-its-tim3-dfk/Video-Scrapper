@@ -175,6 +175,7 @@ def read_csv_rows(
                 'category': row.get('KATEGORI', '').strip(),
                 'date': (row.get('TANGGAL') or row.get('Tanggal') or row.get('date') or '').strip(),
                 'description': (row.get('ANALISIS_PELANGGARAN') or row.get('ANALISIS PELANGGARAN') or '').strip()[:200],
+                '_raw': dict(row),  # simpan semua kolom asli dari CSV
             })
     
     return rows
@@ -263,6 +264,18 @@ async def fetch_caption(url: str, timeout_sec: int = 30) -> tuple:
     return nonempty[0], 'title', 'ok'
 
 
+def _is_profile_url(url: str) -> bool:
+    """Return True if URL points to a channel/profile rather than a single video."""
+    import re
+    # TikTok profile: tiktok.com/@username (no /video/ or /photo/)
+    if re.search(r'tiktok\.com/@[\w.]+/?$', url):
+        return True
+    # YouTube channel/user
+    if re.search(r'youtube\.com/(@|channel/|user/|c/)', url) and '/watch' not in url:
+        return True
+    return False
+
+
 async def _run_ytdlp(
     url: str,
     download_dir: str,
@@ -276,7 +289,14 @@ async def _run_ytdlp(
 
     Returns dict with keys: success, url, error, output_path, attempt.
     """
-    cmd = [sys.executable, '-m', 'yt_dlp', url, '--no-playlist']
+    is_profile = _is_profile_url(url)
+    cmd = [sys.executable, '-m', 'yt_dlp', url]
+    if is_profile:
+        # Profile/channel URL — limit to avoid downloading entire account
+        cmd.extend(['--playlist-items', '1:20'])
+        logging.warning("Profile URL detected (will limit to 20 videos): %s", url[:80])
+    else:
+        cmd.append('--no-playlist')
 
     # Restrict filenames (sanitize for Windows)
     cmd.append('--restrict-filenames')
@@ -312,11 +332,15 @@ async def _run_ytdlp(
             )
 
             if proc.returncode == 0:
-                output = proc.stdout.strip().split('\n')[-1] if proc.stdout else None
+                # --print after_move:filepath prints one line per downloaded file
+                output_paths = [
+                    p for p in (proc.stdout or '').splitlines() if p.strip()
+                ]
                 return {
                     'success': True,
                     'url': url,
-                    'output_path': output,
+                    'output_paths': output_paths,
+                    'output_path': output_paths[-1] if output_paths else None,
                     'attempt': attempt,
                 }
             else:
@@ -483,7 +507,7 @@ async def download_batch(
                 dl_task, caption_task
             )
 
-            # Merge row metadata with result
+            # Merge row metadata with result — include all original CSV columns
             result.update({
                 'row_num': row_num,
                 'platform': platform,
@@ -492,13 +516,25 @@ async def download_batch(
                 'caption_post': caption,
                 'caption_source': caption_source,
                 'caption_status': caption_status,
+                '_raw': row.get('_raw', {}),
             })
 
             if result.get('success'):
-                state.downloaded.append(result)
                 auth_tag = " (with cookies)" if result.get('auth_used') else " (no cookies)"
-                logging.info("  ✓ Downloaded%s [caption=%s]: %s",
-                             auth_tag, caption_status, result.get('output_path', 'dry-run'))
+                output_paths = result.get('output_paths') or (
+                    [result['output_path']] if result.get('output_path') else [None]
+                )
+                # one record per downloaded file → each file traceable to row_num + source url
+                for fpath in output_paths:
+                    state.downloaded.append({
+                        **result,
+                        'output_path': fpath,
+                        'filename': os.path.basename(fpath) if fpath else None,
+                        'row_num': row_num,
+                        'source_url': url,
+                    })
+                logging.info("  ✓ Downloaded%s %d file(s) [caption=%s] row=%d",
+                             auth_tag, len(output_paths), caption_status, row_num)
             else:
                 state.failed.append(result)
                 logging.error("  ✗ Failed: %s", result.get('error'))
@@ -528,27 +564,42 @@ def export_results(download_dir: str, state: CheckpointState) -> None:
     # Downloaded
     if state.downloaded:
         csv_path = os.path.join(download_dir, 'dfk_downloaded.csv')
+
+        # Collect all original CSV column names from _raw
+        raw_keys: list = []
+        for item in state.downloaded:
+            for k in item.get('_raw', {}):
+                if k not in raw_keys:
+                    raw_keys.append(k)
+
+        dl_fields = [
+            'row_num', 'source_url', 'platform', 'category', 'date',
+            'filename', 'output_path',
+            'caption_post', 'caption_source', 'caption_status',
+            'attempt', 'auth_used',
+        ]
+        fieldnames = dl_fields + [k for k in raw_keys if k not in dl_fields]
+
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'row_num', 'url', 'platform', 'category', 'date',
-                'caption_post', 'caption_source', 'caption_status',
-                'output_path', 'attempt', 'auth_used',
-            ])
+            writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction='ignore')
             writer.writeheader()
             for item in state.downloaded:
-                writer.writerow({
+                row_out = {k: item.get('_raw', {}).get(k, '') for k in raw_keys}
+                row_out.update({
                     'row_num': item.get('row_num'),
-                    'url': item.get('url'),
+                    'source_url': item.get('source_url') or item.get('url'),
                     'platform': item.get('platform'),
                     'category': item.get('category'),
                     'date': item.get('date'),
+                    'filename': item.get('filename'),
+                    'output_path': item.get('output_path'),
                     'caption_post': item.get('caption_post', ''),
                     'caption_source': item.get('caption_source', ''),
                     'caption_status': item.get('caption_status', ''),
-                    'output_path': item.get('output_path'),
                     'attempt': item.get('attempt'),
                     'auth_used': item.get('auth_used', ''),
                 })
+                writer.writerow(row_out)
         logging.info("Exported %d downloads to %s", len(state.downloaded), csv_path)
     
     # Failed

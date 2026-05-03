@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Shared header for video CSV files
 VIDEO_CSV_HEADER = [
-    "no", "video_name", "link_article", "article_title", "link_video_asli",
+    "no", "video_name", "filename", "link_article", "article_title", "link_video_asli",
     "has_audio", "category", "matched_keyword", "snippet",
     "date", "author", "image_url", "caption_post",
     "narasi", "penjelasan", "kesimpulan",
@@ -50,6 +50,7 @@ def write_video_index(
         [
             i,
             item.get("title") or "",
+            item.get("filename") or "",
             item.get("article", ""),
             item.get("article_title", ""),
             item.get("url", ""),
@@ -89,6 +90,7 @@ def write_extracted_videos(
         [
             i,
             item.get("title") or "",
+            item.get("filename") or "",
             item.get("article", ""),
             item.get("article_title", ""),
             item.get("url", ""),
@@ -179,6 +181,7 @@ def write_downloaded_videos(
         [
             i,
             item.get("title") or "",
+            item.get("filename") or "",
             item.get("article", ""),
             item.get("article_title", ""),
             item.get("url", ""),

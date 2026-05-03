@@ -153,21 +153,28 @@ def read_csv_rows(
             if end_row and idx > end_row:
                 break
             
-            url = row.get('URL KONTEN', '').strip()
+            url = (
+                row.get('URL_KONTEN')
+                or row.get('URL KONTEN')
+                or row.get('url_clean')
+                or row.get('url')
+                or row.get('URL')
+                or ''
+            ).strip()
             if not url:
                 continue
-            
+
             platform = normalize_platform(row.get('PLATFORM', '').strip())
             if platforms and platform not in platforms:
                 continue
-            
+
             rows.append({
                 'row_num': idx,
                 'url': url,
                 'platform': platform,
                 'category': row.get('KATEGORI', '').strip(),
-                'date': row.get('Tanggal', '').strip(),
-                'description': row.get('ANALISIS PELANGGARAN', '').strip()[:200],
+                'date': (row.get('TANGGAL') or row.get('Tanggal') or row.get('date') or '').strip(),
+                'description': (row.get('ANALISIS_PELANGGARAN') or row.get('ANALISIS PELANGGARAN') or '').strip()[:200],
             })
     
     return rows

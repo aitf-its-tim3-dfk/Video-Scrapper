@@ -6,6 +6,8 @@ dist/
 build/
 *.egg
 
+CLAUDE.md
+
 # Virtual environments
 .venv/
 venv/

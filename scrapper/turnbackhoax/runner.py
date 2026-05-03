@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import re
 from typing import Any, Dict, List, Optional
 
 from turnbackhoax.checkpoint import CheckpointState, load_checkpoint, save_checkpoint
 from turnbackhoax.config import ScrapeConfig
-from turnbackhoax.downloader import download_videos
+from turnbackhoax.downloader import download_videos_async
 from turnbackhoax.exporter import write_downloaded_videos, write_extracted_videos, write_skipped_items, write_video_index
 from turnbackhoax.fetcher import FetchResult, fetch_many, fetch_page
 from turnbackhoax.parser import (
@@ -27,14 +28,6 @@ from turnbackhoax.parser import (
 from turnbackhoax.prober import probe_video
 
 logger = logging.getLogger(__name__)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-def _batches(items: List[Any], size: int) -> List[List[Any]]:
-    """Yield successive *size*-length slices of *items*."""
-    return [items[i : i + size] for i in range(0, len(items), size)]
 
 
 async def _probe_in_executor(
@@ -115,29 +108,20 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
         article_links = find_article_links_from_listing(listing_resp, config.base_url)
         logger.info("Found %d articles on page %d", len(article_links), page)
 
-        # ── Process articles in concurrent batches ────────────────────
-        for batch_start in range(0, len(article_links), config.concurrency):
-            batch = article_links[batch_start : batch_start + config.concurrency]
-            urls: List[str] = [str(info["url"]) for info in batch if info.get("url")]
+        # ── Fetch ALL articles on this page concurrently ──────────────
+        # fetch_many's internal Semaphore(concurrency) caps active connections.
+        pending_links = [
+            info for info in article_links
+            if info.get("url") and not state.is_article_processed(str(info["url"]))
+        ]
 
-            # Filter out already-processed articles
-            fetch_indices: List[int] = []
-            fetch_urls: List[str] = []
-            for idx, url in enumerate(urls):
-                if state.is_article_processed(url):
-                    logger.debug("Skipping already-processed article: %s", url)
-                    continue
-                fetch_indices.append(idx)
-                fetch_urls.append(url)
-
-            if not fetch_urls:
-                continue
-
+        if not pending_links:
+            logger.info("  All articles on page %d already processed", page)
+        else:
+            fetch_urls: List[str] = [str(info["url"]) for info in pending_links]
             logger.info(
-                "  Fetching %d articles (batch %d..%d)",
-                len(fetch_urls),
-                batch_start + 1,
-                batch_start + len(batch),
+                "  Fetching %d articles concurrently (max %d at once)...",
+                len(fetch_urls), config.concurrency,
             )
 
             responses = await fetch_many(
@@ -149,10 +133,10 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                 max_delay=config.max_delay_page,
             )
 
-            # ── Per-article processing ────────────────────────────────
-            for resp_idx, resp in enumerate(responses):
-                orig_idx = fetch_indices[resp_idx]
-                link_info = batch[orig_idx]
+            # ── Phase 1: Parse all responses (no network I/O) ────────
+            pending_articles: List[Dict[str, Any]] = []
+
+            for resp, link_info in zip(responses, pending_links):
                 article_url: str = link_info.get("url") or ""
                 card_category = link_info.get("category")
 
@@ -173,20 +157,17 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
 
                 logger.info("  -> Processing article: %s", article_url)
 
-                # ── Keyword filtering ─────────────────────────────────
                 matched_keyword: Optional[str] = None
                 article_text = ""
                 article_title: Optional[str] = None
 
                 if kw_patterns:
                     article_text, article_title = extract_article_text_and_title(resp)
-
                     fields_to_check: List[str] = []
                     if config.keyword_field in ("body", "both"):
                         fields_to_check.append(article_text)
                     if config.keyword_field in ("title", "both") and article_title:
                         fields_to_check.append(article_title)
-
                     matched_keyword = match_keywords(kw_patterns, fields_to_check)
 
                     if not matched_keyword:
@@ -201,7 +182,6 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         save_checkpoint(ckpt_path, state)
                         continue
 
-                # ── Detect video URLs ─────────────────────────────────
                 vids = detect_video_urls(resp, debug=config.debug)
 
                 if not vids:
@@ -216,37 +196,71 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                     save_checkpoint(ckpt_path, state)
                     continue
 
-                # ── Extract article metadata ─────────────────────────────
-                logger.info("    Extracting article metadata...")
                 article_metadata = extract_article_metadata(resp)
-                logger.debug("    Extracted: date=%s, author=%s, factcheck=%s",
-                            article_metadata.get("date"),
-                            article_metadata.get("author"),
-                            article_metadata.get("factcheck_result"))
-
                 logger.info("    Found %d video(s):", len(vids))
+                for v in vids:
+                    logger.info("      %s", v)
 
-                for vid_url in vids:
-                    logger.info("      %s", vid_url)
+                pending_articles.append({
+                    "url": article_url,
+                    "category": card_category,
+                    "vids": list(vids),
+                    "metadata": article_metadata,
+                    "matched_keyword": matched_keyword,
+                    "article_text": article_text,
+                })
 
-                    # Deduplicate across entire run
-                    if any(v.get("url") == vid_url for v in state.found_videos):
-                        logger.debug("      (duplicate, skipping)")
-                        continue
+            # ── Phase 2: Probe all new video URLs concurrently ────────
+            already_seen = {v.get("url") for v in state.found_videos}
+            probe_inputs: List[tuple] = [
+                (art, vid_url)
+                for art in pending_articles
+                for vid_url in art["vids"]
+                if vid_url not in already_seen
+            ]
 
-                    # ── Probe video ───────────────────────────────────
-                    probe = await _probe_in_executor(
+            probe_map: Dict[str, Any] = {}
+            if probe_inputs:
+                logger.info("  Probing %d video(s) concurrently...", len(probe_inputs))
+                probe_results = await asyncio.gather(*[
+                    _probe_in_executor(
                         vid_url,
                         cookiefile=cookiefile,
                         cookies_from_browser=cookies_browser,
                     )
+                    for _, vid_url in probe_inputs
+                ])
+                probe_map = {
+                    vid_url: probe
+                    for (_, vid_url), probe in zip(probe_inputs, probe_results)
+                }
+
+            # ── Phase 3: Build records and checkpoint per article ─────
+            for art in pending_articles:
+                article_url = art["url"]
+                card_category = art["category"]
+                article_metadata = art["metadata"]
+                matched_keyword = art["matched_keyword"]
+                article_text = art["article_text"]
+
+                for vid_url in art["vids"]:
+                    if vid_url in already_seen:
+                        logger.debug("      (duplicate, skipping) %s", vid_url)
+                        continue
+
+                    probe = probe_map.get(vid_url, {
+                        "error": "probe skipped",
+                        "has_audio": False,
+                        "has_combined": False,
+                        "recommended_format": None,
+                        "title": None,
+                    })
                     chosen = probe.get("recommended_format")
                     video_title = probe.get("title") or ""
                     logger.info(
                         "      probe -> has_audio=%s recommended_format=%s "
                         "title=%s error=%s",
-                        probe.get("has_audio"), chosen,
-                        video_title, probe.get("error"),
+                        probe.get("has_audio"), chosen, video_title, probe.get("error"),
                     )
 
                     rec: Dict[str, Any] = {
@@ -254,9 +268,9 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         "chosen_format": chosen,
                         "has_audio": probe.get("has_audio"),
                         "title": video_title,
+                        "caption_post": probe.get("caption_post", ""),
                         "article": article_url,
                         "category": card_category,
-                        # Add article metadata
                         "article_title": article_metadata.get("title"),
                         "date": article_metadata.get("date"),
                         "author": article_metadata.get("author"),
@@ -285,9 +299,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         if config.show_snippet and article_text:
                             try:
                                 m = re.search(
-                                    r"(.{0,40}"
-                                    + re.escape(matched_keyword)
-                                    + r".{0,40})",
+                                    r"(.{0,40}" + re.escape(matched_keyword) + r".{0,40})",
                                     article_text,
                                     re.IGNORECASE,
                                 )
@@ -296,9 +308,11 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                                 rec["snippet"] = ""
 
                     state.add_video(rec)
+                    already_seen.add(vid_url)
 
                 state.mark_article_processed(article_url)
                 save_checkpoint(ckpt_path, state)
+        # end else (pending_links)
 
         # ── Download videos from this page ────────────────────────────
         # Get videos that were found in this page only (not yet downloaded)
@@ -331,7 +345,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
             logger.info("Downloading %d videos from page %d...", len(page_videos), page)
             logger.info("=" * 60)
             
-            page_success = download_videos(
+            page_success = await download_videos_async(
                 page_videos,
                 download_dir=config.download_dir,
                 output_template=config.output_template,
@@ -343,6 +357,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                 cookies_from_browser=config.cookies_from_browser,
                 use_cookies_from_browser=config.use_cookies_from_browser,
                 smart_cookies=config.smart_cookies,
+                concurrency=config.download_concurrency,
             )
             
             # Mark these videos as download attempted
@@ -366,7 +381,6 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
     logger.info("Total unique video URLs found: %d", len(state.found_videos))
 
     # Write CSVs
-    import os
     os.makedirs(config.download_dir, exist_ok=True)
     write_video_index(config.download_dir, state.found_videos)
     write_extracted_videos(config.download_dir, state.found_videos)

@@ -48,6 +48,7 @@ class ScrapeConfig:
     # --- Fetcher ---
     fetcher_mode: FetcherMode = "http"
     concurrency: int = 5
+    download_concurrency: int = 2
     user_agent: str = "Mozilla/5.0 (compatible; scraper/1.0; +https://example.com)"
 
     # --- Resumability ---
@@ -124,6 +125,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Scrapling fetcher mode: http (fast), dynamic (JS rendering), stealth (anti-bot)")
     p.add_argument("--concurrency", type=int, default=5,
                    help="Max concurrent article fetches")
+    p.add_argument("--download-concurrency", type=int, default=2,
+                   help="Max concurrent yt-dlp download processes")
     p.add_argument("--user-agent",
                    default="Mozilla/5.0 (compatible; scraper/1.0; +https://example.com)")
 
@@ -172,6 +175,7 @@ def parse_args(argv: Optional[List[str]] = None) -> ScrapeConfig:
         show_snippet=args.show_snippet,
         fetcher_mode=args.fetcher_mode,
         concurrency=args.concurrency,
+        download_concurrency=args.download_concurrency,
         user_agent=args.user_agent,
         checkpoint_file=args.checkpoint_file,
         resume=args.resume,

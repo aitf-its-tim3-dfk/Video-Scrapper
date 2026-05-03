@@ -18,7 +18,8 @@ import sys
 # where the user's CWD is.
 _SCRAPPER_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _SCRAPLING_ROOT = os.path.join(_SCRAPPER_DIR, "Scrapling")
-if _SCRAPLING_ROOT not in sys.path:
-    sys.path.insert(0, _SCRAPLING_ROOT)
+for _p in (_SCRAPLING_ROOT, _SCRAPPER_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 __version__ = "0.1.0"

@@ -7,11 +7,13 @@ import sys
 from typing import List, Optional
 
 from turnbackhoax.config import parse_args
+from turnbackhoax.prober import ensure_yt_dlp
 from turnbackhoax.runner import scrape_pages_and_download
 
 
 def main(argv: Optional[List[str]] = None) -> None:
     """Parse CLI arguments and launch the async scrape pipeline."""
+    ensure_yt_dlp()
     config = parse_args(argv)
 
     logging.basicConfig(

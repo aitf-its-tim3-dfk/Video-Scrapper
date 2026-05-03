@@ -88,11 +88,7 @@ def save_checkpoint(path: str, state: CheckpointState) -> None:
     try:
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(payload, fh, indent=2, ensure_ascii=False)
-        # atomic-ish rename (works on Windows if target doesn't exist or
-        # on Python 3.12+ with os.replace)
-        if os.path.exists(path):
-            os.remove(path)
-        os.rename(tmp, path)
+        os.replace(tmp, path)
         logger.debug("Checkpoint saved to %s", path)
     except OSError as exc:
         logger.error("Failed to save checkpoint to %s: %s", path, exc)

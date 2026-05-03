@@ -1,6 +1,7 @@
 """yt-dlp video download logic."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import random
@@ -10,29 +11,10 @@ import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional
 
+import turnbackhoax  # noqa: F401 — triggers __init__.py which puts scrapper/ on sys.path
+from ytdlp_utils import AUTH_ERROR_PATTERNS, is_auth_error
+
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Auth-error detection (shared pattern list with dfk_downloader.py)
-# ---------------------------------------------------------------------------
-AUTH_ERROR_PATTERNS = [
-    'login required',
-    'authentication',
-    'api is not granting access',
-    'http error 400',
-    'http error 401',
-    'http error 403',
-    'rate-limit',
-    'requested content is not available',
-    'members only',
-    'locked behind the login page',
-]
-
-
-def is_auth_error(error_msg: str) -> bool:
-    """Detect if a yt-dlp error is authentication/login related."""
-    error_lower = error_msg.lower()
-    return any(p in error_lower for p in AUTH_ERROR_PATTERNS)
 
 
 def is_format_error(error_msg: str) -> bool:
@@ -278,4 +260,82 @@ def download_videos(
             logger.info("Sleeping %.1fs before next download...", delay)
             time.sleep(delay)
 
+    return success_count
+
+
+# ---------------------------------------------------------------------------
+# Async concurrent batch download
+# ---------------------------------------------------------------------------
+async def download_videos_async(
+    items: Iterable[Any],
+    download_dir: str,
+    output_template: Optional[str],
+    cookies: Optional[str],
+    use_cookies: bool,
+    min_delay: float = 5.0,
+    max_delay: float = 10.0,
+    dry_run: bool = False,
+    cookies_from_browser: Optional[str] = None,
+    use_cookies_from_browser: bool = False,
+    smart_cookies: bool = True,
+    concurrency: int = 2,
+) -> int:
+    """Concurrent version of :func:`download_videos`.
+
+    Runs up to *concurrency* yt-dlp subprocesses in parallel using a thread
+    pool executor, with a randomised politeness delay after each download.
+    Returns the number of successful downloads.
+    """
+    normalised: List[Dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, str):
+            normalised.append({"url": item, "chosen_format": None})
+        elif isinstance(item, dict):
+            normalised.append({
+                "url": item.get("url"),
+                "chosen_format": item.get("chosen_format"),
+            })
+
+    eff_cookies = cookies if use_cookies else None
+    eff_cookies_browser = cookies_from_browser if use_cookies_from_browser else None
+
+    sem = asyncio.Semaphore(concurrency)
+    loop = asyncio.get_running_loop()
+    success_count = 0
+    count_lock = asyncio.Lock()
+
+    async def _dl(i: int, entry: Dict[str, Any]) -> None:
+        nonlocal success_count
+        async with sem:
+            url = entry["url"]
+            fmt = entry.get("chosen_format")
+            logger.info("[%d/%d] Downloading: %s", i, len(normalised), url)
+            if fmt:
+                logger.info("  -> using format: %s", fmt)
+
+            result = await loop.run_in_executor(
+                None,
+                lambda: _download_one(
+                    url,
+                    download_dir=download_dir,
+                    output_template=output_template,
+                    cookies=eff_cookies,
+                    cookies_from_browser=eff_cookies_browser,
+                    chosen_format=fmt,
+                    smart_cookies=smart_cookies,
+                    dry_run=dry_run,
+                ),
+            )
+
+            if result["success"]:
+                auth_tag = " (with cookies)" if result.get("auth_used") else " (no cookies)"
+                logger.info("  ✓ Downloaded%s: %s", auth_tag, url)
+                async with count_lock:
+                    success_count += 1
+            else:
+                logger.error("  ✗ Failed: %s — %s", url, result.get("error", "unknown"))
+
+            await asyncio.sleep(random.uniform(min_delay, max_delay))
+
+    await asyncio.gather(*[_dl(i, e) for i, e in enumerate(normalised, 1)])
     return success_count

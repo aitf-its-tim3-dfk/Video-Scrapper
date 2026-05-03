@@ -12,8 +12,9 @@ logger = logging.getLogger(__name__)
 VIDEO_CSV_HEADER = [
     "no", "video_name", "link_article", "article_title", "link_video_asli",
     "has_audio", "category", "matched_keyword", "snippet",
-    "date", "author", "image_url", "narasi", "penjelasan", 
-    "kesimpulan", "factcheck_result", "factcheck_source", "references",
+    "date", "author", "image_url", "caption_post",
+    "narasi", "penjelasan", "kesimpulan",
+    "factcheck_result", "factcheck_source", "references",
 ]
 
 SKIPPED_CSV_HEADER = [
@@ -59,6 +60,7 @@ def write_video_index(
             item.get("date", ""),
             item.get("author", ""),
             item.get("image_url", ""),
+            item.get("caption_post", ""),
             item.get("narasi", ""),
             item.get("penjelasan", ""),
             item.get("kesimpulan", ""),
@@ -97,6 +99,7 @@ def write_extracted_videos(
             item.get("date", ""),
             item.get("author", ""),
             item.get("image_url", ""),
+            item.get("caption_post", ""),
             item.get("narasi", ""),
             item.get("penjelasan", ""),
             item.get("kesimpulan", ""),
@@ -186,6 +189,7 @@ def write_downloaded_videos(
             item.get("date", ""),
             item.get("author", ""),
             item.get("image_url", ""),
+            item.get("caption_post", ""),
             item.get("narasi", ""),
             item.get("penjelasan", ""),
             item.get("kesimpulan", ""),

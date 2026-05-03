@@ -33,8 +33,6 @@ def probe_video(
     ``has_audio``, ``has_combined``, ``recommended_format``, ``title``,
     and optionally ``error``.
     """
-    ensure_yt_dlp()
-
     try:
         from yt_dlp import YoutubeDL
     except Exception:
@@ -50,6 +48,7 @@ def probe_video(
         "skip_download": True,
         "quiet": True,
         "no_warnings": True,
+        "socket_timeout": timeout,
     }
     if cookiefile:
         ydl_opts["cookiefile"] = cookiefile
@@ -86,12 +85,10 @@ def probe_video(
             has_audio = True
         if ac and ac != "none" and vc and vc != "none":
             has_combined = True
-        # HLS/DASH manifests may not always set acodec on entries
+        # HLS/DASH manifests may not always set acodec on format entries;
+        # conservatively assume audio is present.
         if proto and any(x in proto for x in ("m3u8", "hls", "dash", "f4m")):
-            if abr or asr:
-                has_audio = True
-            else:
-                has_audio = True  # conservatively assume audio
+            has_audio = True
 
     # Top-level acodec check
     top_ac = info.get("acodec")
@@ -105,9 +102,14 @@ def probe_video(
         recommended = "bestvideo"
 
     title = info.get("title")
+    description = info.get("description") or ""
+    # Flatten newlines to single spaces, same as reference script
+    caption = " ".join(description.replace("\r", " ").split()).strip()
+
     return {
         "has_audio": has_audio,
         "has_combined": has_combined,
         "recommended_format": recommended,
         "title": title,
+        "caption_post": caption,
     }

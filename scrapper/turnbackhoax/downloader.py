@@ -48,7 +48,7 @@ def build_yt_dlp_cmd(
     if download_dir:
         os.makedirs(download_dir, exist_ok=True)
         # Limit title length to 100 chars (use .100B for bytes, safer for Unicode)
-        outtmpl = output_template or "%(title).100B.%(ext)s"
+        outtmpl = output_template or "%(id)s_%(title).80B.%(ext)s"
         cmd += ["-o", os.path.join(download_dir, outtmpl)]
     elif output_template:
         cmd += ["-o", output_template]

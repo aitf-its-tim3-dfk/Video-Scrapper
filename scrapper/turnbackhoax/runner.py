@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import re
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from turnbackhoax.checkpoint import CheckpointState, load_checkpoint, save_checkpoint
@@ -19,6 +20,7 @@ from turnbackhoax.exporter import write_downloaded_videos, write_extracted_video
 from turnbackhoax.fetcher import FetchResult, fetch_many, fetch_page
 from turnbackhoax.parser import (
     compile_keyword_patterns,
+    detect_photo_urls,
     detect_video_urls,
     extract_article_metadata,
     extract_article_text_and_title,
@@ -28,6 +30,18 @@ from turnbackhoax.parser import (
 from turnbackhoax.prober import probe_video
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_article_date(date_str: str) -> Optional[date]:
+    """Parse article date string to a date object for comparison."""
+    if not date_str:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.strptime(date_str[:len(fmt)], fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 async def _probe_in_executor(
@@ -82,8 +96,20 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
     # ── Pre-compile keyword patterns ──────────────────────────────────
     kw_patterns = compile_keyword_patterns(config.keywords, config.keyword_mode)
 
+    # ── Parse stop-before-date cutoff ────────────────────────────────
+    stop_cutoff: Optional[date] = None
+    if config.stop_before_date:
+        stop_cutoff = _parse_article_date(config.stop_before_date)
+        if stop_cutoff:
+            logger.info("Will stop when articles older than %s are found", stop_cutoff)
+        else:
+            logger.warning("Could not parse --stop-before-date=%r, ignoring", config.stop_before_date)
+
     # ── Page loop ─────────────────────────────────────────────────────
+    reached_cutoff = False
     for page in range(config.start_page, config.end_page + 1):
+        if reached_cutoff:
+            break
         # Resume support: skip pages already fully processed
         if config.resume and page < state.last_page:
             logger.info("Skipping page %d (already checkpointed)", page)
@@ -157,6 +183,22 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
 
                 logger.info("  -> Processing article: %s", article_url)
 
+                # ── Extract metadata early (needed for date check) ───
+                article_metadata = extract_article_metadata(resp)
+
+                # ── Stop-before-date check ───────────────────────────
+                if stop_cutoff:
+                    art_date = _parse_article_date(article_metadata.get("date") or "")
+                    if art_date and art_date < stop_cutoff:
+                        logger.info(
+                            "    Article date %s < cutoff %s — stopping pagination",
+                            art_date, stop_cutoff,
+                        )
+                        reached_cutoff = True
+                        state.mark_article_processed(article_url)
+                        save_checkpoint(ckpt_path, state)
+                        continue
+
                 matched_keyword: Optional[str] = None
                 article_text = ""
                 article_title: Optional[str] = None
@@ -182,57 +224,67 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         save_checkpoint(ckpt_path, state)
                         continue
 
-                vids = detect_video_urls(resp, debug=config.debug)
+                video_urls = detect_video_urls(resp, debug=config.debug)
+                photo_urls = detect_photo_urls(resp, debug=config.debug)
 
-                if not vids:
-                    logger.info("    No video embeds/links found.")
+                # media = list of (url, media_type) filtered by config.media_type
+                media: List[tuple] = []
+                if config.media_type in ("video", "all"):
+                    media += [(u, "video") for u in video_urls]
+                if config.media_type in ("photo", "all"):
+                    media += [(u, "photo") for u in photo_urls - video_urls]
+
+                if not media:
+                    logger.info("    No media embeds/links found.")
                     state.add_skipped({
                         "article": article_url, "url": "",
-                        "reason": "no_video_found",
-                        "detail": "no embeds/links detected",
+                        "reason": "no_media_found",
+                        "detail": "no video/photo embeds detected",
                         "category": card_category,
                     })
                     state.mark_article_processed(article_url)
                     save_checkpoint(ckpt_path, state)
                     continue
 
-                article_metadata = extract_article_metadata(resp)
-                logger.info("    Found %d video(s):", len(vids))
-                for v in vids:
-                    logger.info("      %s", v)
+                logger.info("    Found %d media item(s) (%d video, %d photo):",
+                            len(media),
+                            sum(1 for _, t in media if t == "video"),
+                            sum(1 for _, t in media if t == "photo"))
+                for u, t in media:
+                    logger.info("      [%s] %s", t, u)
 
                 pending_articles.append({
                     "url": article_url,
                     "category": card_category,
-                    "vids": list(vids),
+                    "media": media,
                     "metadata": article_metadata,
                     "matched_keyword": matched_keyword,
                     "article_text": article_text,
                 })
 
-            # ── Phase 2: Probe all new video URLs concurrently ────────
+            # ── Phase 2: Probe all new media URLs concurrently ───────
             already_seen = {v.get("url") for v in state.found_videos}
             probe_inputs: List[tuple] = [
-                (art, vid_url)
+                (art, media_url, media_type)
                 for art in pending_articles
-                for vid_url in art["vids"]
-                if vid_url not in already_seen
+                for media_url, media_type in art["media"]
+                if media_url not in already_seen
             ]
 
             probe_map: Dict[str, Any] = {}
             if probe_inputs:
-                logger.info("  Probing %d video(s) concurrently...", len(probe_inputs))
+                logger.info("  Probing %d media item(s) concurrently...", len(probe_inputs))
                 probe_results = await asyncio.gather(*[
                     _probe_in_executor(
-                        vid_url,
+                        media_url,
                         cookiefile=cookiefile,
                         cookies_from_browser=cookies_browser,
                     )
-                    for _, vid_url in probe_inputs
+                    for _, media_url, _ in probe_inputs
                 ])
                 probe_map = {
-                    vid_url: probe
-                    for (_, vid_url), probe in zip(probe_inputs, probe_results)
+                    media_url: probe
+                    for (_, media_url, _), probe in zip(probe_inputs, probe_results)
                 }
 
             # ── Phase 3: Build records and checkpoint per article ─────
@@ -243,12 +295,12 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                 matched_keyword = art["matched_keyword"]
                 article_text = art["article_text"]
 
-                for vid_url in art["vids"]:
-                    if vid_url in already_seen:
-                        logger.debug("      (duplicate, skipping) %s", vid_url)
+                for media_url, media_type in art["media"]:
+                    if media_url in already_seen:
+                        logger.debug("      (duplicate, skipping) %s", media_url)
                         continue
 
-                    probe = probe_map.get(vid_url, {
+                    probe = probe_map.get(media_url, {
                         "error": "probe skipped",
                         "has_audio": False,
                         "has_combined": False,
@@ -256,18 +308,20 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         "title": None,
                     })
                     chosen = probe.get("recommended_format")
-                    video_title = probe.get("title") or ""
+                    media_title = probe.get("title") or ""
                     logger.info(
-                        "      probe -> has_audio=%s recommended_format=%s "
+                        "      probe [%s] -> has_audio=%s recommended_format=%s "
                         "title=%s error=%s",
-                        probe.get("has_audio"), chosen, video_title, probe.get("error"),
+                        media_type, probe.get("has_audio"), chosen,
+                        media_title, probe.get("error"),
                     )
 
                     rec: Dict[str, Any] = {
-                        "url": vid_url,
+                        "url": media_url,
+                        "media_type": media_type,
                         "chosen_format": chosen,
                         "has_audio": probe.get("has_audio"),
-                        "title": video_title,
+                        "title": media_title,
                         "caption_post": probe.get("caption_post", ""),
                         "article": article_url,
                         "category": card_category,
@@ -287,7 +341,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                         rec["probe_error"] = probe["error"]
                         state.add_skipped({
                             "article": article_url,
-                            "url": vid_url,
+                            "url": media_url,
                             "reason": "probe_error",
                             "detail": probe["error"],
                             "matched_keyword": matched_keyword or "",
@@ -308,7 +362,7 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
                                 rec["snippet"] = ""
 
                     state.add_video(rec)
-                    already_seen.add(vid_url)
+                    already_seen.add(media_url)
 
                 state.mark_article_processed(article_url)
                 save_checkpoint(ckpt_path, state)

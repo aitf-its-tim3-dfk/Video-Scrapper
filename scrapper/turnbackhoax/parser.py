@@ -1,4 +1,4 @@
-"""HTML parsing — article link extraction and video URL detection.
+"""HTML parsing — article link extraction and media URL detection (video + photo).
 
 Uses Scrapling CSS selectors instead of BeautifulSoup.
 """
@@ -189,33 +189,17 @@ def extract_article_metadata(response: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Video URL detection from an article page
 # ---------------------------------------------------------------------------
-def detect_video_urls(response: Any, debug: bool = False) -> Set[str]:
-    """Scan an article page for embedded video URLs.
-
-    *response* is a :class:`~turnbackhoax.fetcher.FetchResult`.
-
-    Returns a set of probable video URLs found in iframes, anchors, and
-    visible text within the article wrapper.
-    """
+def _scan_article_urls(response: Any, classifier, debug: bool = False) -> Set[str]:
+    """Generic URL scanner — applies *classifier(url, debug)* to all links in article."""
     found: Set[str] = set()
-
-    # Prefer the article wrapper
     wrapper_els = response.css(".article-origin.custom-styling-editor")
     root = wrapper_els[0] if wrapper_els else response
 
-    # --- Check iframes ---
     for iframe in root.css("iframe[src]"):
         src = _get_attr(iframe, "src")
-        if not src:
-            continue
-        if "mafindoid" in src.lower():
-            if debug:
-                logger.debug("    Skipping MafindoID iframe: %s", src)
-            continue
-        if _is_probable_video_url(src, debug):
+        if src and "mafindoid" not in src.lower() and classifier(src, debug):
             found.add(src)
 
-    # --- Check anchors ---
     for a in root.css("a[href]"):
         href = _get_attr(a, "href")
         if not href:
@@ -223,24 +207,32 @@ def detect_video_urls(response: Any, debug: bool = False) -> Set[str]:
         href = href.strip()
         a_text = _get_text(a)
         if "mafindoid" in href.lower() or (a_text and "mafindoid" in a_text.lower()):
-            if debug:
-                logger.debug("    Skipping MafindoID link: %s", href)
             continue
-        if _is_probable_video_url(href, debug):
+        if classifier(href, debug):
             found.add(href)
 
-    # --- Check visible text for bare URLs ---
     text = root.get_all_text(separator=" ") if hasattr(root, "get_all_text") else _get_text(root)
     if text:
         for token in text.split():
-            if not token.startswith("http"):
-                continue
-            if "mafindoid" in token.lower():
-                continue
-            if _is_probable_video_url(token, debug):
-                found.add(token)
+            if token.startswith("http") and "mafindoid" not in token.lower():
+                if classifier(token, debug):
+                    found.add(token)
 
     return found
+
+
+def detect_video_urls(response: Any, debug: bool = False) -> Set[str]:
+    """Scan an article page for embedded video URLs."""
+    return _scan_article_urls(response, _is_probable_video_url, debug)
+
+
+def detect_photo_urls(response: Any, debug: bool = False) -> Set[str]:
+    """Scan an article page for embedded photo/image post URLs.
+
+    Targets platform photo posts (TikTok slideshow, Instagram photo,
+    Facebook photo, Twitter image tweet).  Does NOT return raw .jpg/.png files.
+    """
+    return _scan_article_urls(response, _is_probable_photo_url, debug)
 
 
 # ---------------------------------------------------------------------------
@@ -341,6 +333,53 @@ def _is_probable_video_url(url: str, debug: bool = False) -> bool:
 
     if debug:
         logger.debug("    Rejected host (not in whitelist): %s", url)
+    return False
+
+
+def _is_probable_photo_url(url: str, debug: bool = False) -> bool:
+    """Return True if *url* looks like a platform photo/image post."""
+    if not url:
+        return False
+
+    base = url.split("?")[0].lower()
+    # Skip raw image files — those aren't platform posts
+    if base.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".mp4", ".webm")):
+        return False
+
+    try:
+        parsed = urlparse(url)
+        netloc = (parsed.netloc or "").lower()
+        path = (parsed.path or "").lower()
+    except Exception:
+        return False
+
+    # TikTok photo/slideshow posts
+    if "tiktok.com" in netloc:
+        if "/photo/" in path:
+            return True
+        return False
+
+    # Instagram — photo posts (/p/) that are NOT reels/video (reels handled by video detector)
+    if "instagram.com" in netloc:
+        if path.startswith("/p/"):
+            return True
+        return False
+
+    # Facebook photo posts
+    if "facebook.com" in netloc or "fb.watch" in netloc:
+        if "/photo" in path or "/photos" in path:
+            return True
+        # Share photo links
+        if "/share/p/" in path:
+            return True
+        return False
+
+    # Twitter/X — image tweets (yt-dlp downloads attached images)
+    if "x.com" in netloc or "twitter.com" in netloc:
+        if "/status/" in path:
+            return True
+        return False
+
     return False
 
 

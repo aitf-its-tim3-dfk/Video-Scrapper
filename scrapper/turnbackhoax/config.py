@@ -24,7 +24,7 @@ class ScrapeConfig:
 
     # --- Output ---
     download_dir: str = "downloaded_videos"
-    output_template: Optional[str] = None
+    output_template: Optional[str] = "%(id)s_%(title).80B.%(ext)s"
 
     # --- Cookies ---
     cookies: Optional[str] = None
@@ -44,6 +44,7 @@ class ScrapeConfig:
     keyword_mode: Literal["whole", "substring"] = "whole"
     keyword_field: Literal["body", "title", "both"] = "both"
     show_snippet: bool = False
+    media_type: Literal["video", "photo", "all"] = "video"
 
     # --- Fetcher ---
     fetcher_mode: FetcherMode = "http"
@@ -54,6 +55,7 @@ class ScrapeConfig:
     # --- Resumability ---
     checkpoint_file: Optional[str] = None
     resume: bool = False
+    stop_before_date: Optional[str] = None  # ISO date string, e.g. "2025-05-01"
 
     # --- Debugging ---
     debug: bool = False
@@ -111,6 +113,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Filtering
     p.add_argument("--skip-no-audio", action="store_true",
                    help="Skip downloading items that probe as having no audio")
+    p.add_argument("--media-type", choices=("video", "photo", "all"), default="video",
+                   help="Media type to scrape: video (default), photo, or all")
     p.add_argument("--keyword", action="append",
                    help="Keyword to filter articles (repeatable). Whole-word matching by default")
     p.add_argument("--keyword-mode", choices=("whole", "substring"), default="whole",
@@ -135,6 +139,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Path to JSON checkpoint file (default: <download_dir>/checkpoint.json)")
     p.add_argument("--resume", action="store_true",
                    help="Resume from last checkpoint")
+    p.add_argument("--stop-before-date",
+                   help="Stop scraping when articles older than this date are found (ISO format: YYYY-MM-DD)")
 
     # Debugging
     p.add_argument("--debug", action="store_true",
@@ -173,12 +179,14 @@ def parse_args(argv: Optional[List[str]] = None) -> ScrapeConfig:
         keyword_mode=args.keyword_mode,
         keyword_field=args.keyword_field,
         show_snippet=args.show_snippet,
+        media_type=args.media_type,
         fetcher_mode=args.fetcher_mode,
         concurrency=args.concurrency,
         download_concurrency=args.download_concurrency,
         user_agent=args.user_agent,
         checkpoint_file=args.checkpoint_file,
         resume=args.resume,
+        stop_before_date=args.stop_before_date,
         debug=args.debug,
         dry_run=args.dry_run,
         log_level=args.log_level,

@@ -127,7 +127,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Fetcher
     p.add_argument("--fetcher-mode", choices=("http", "dynamic", "stealth"), default="http",
                    help="Scrapling fetcher mode: http (fast), dynamic (JS rendering), stealth (anti-bot)")
-    p.add_argument("--concurrency", type=int, default=5,
+    p.add_argument("--concurrency", type=int, default=8,
                    help="Max concurrent article fetches")
     p.add_argument("--download-concurrency", type=int, default=4,
                    help="Max concurrent yt-dlp download processes")

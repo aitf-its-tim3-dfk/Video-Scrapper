@@ -16,7 +16,7 @@ import sys
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-VIDEO_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v"}
+MEDIA_EXT = {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".jpg", ".jpeg", ".png", ".webp"}
 
 
 def parse_args():
@@ -57,14 +57,14 @@ def main():
         logger.error("Failed to create/access repo: %s", exc)
         sys.exit(1)
 
-    # Count video files
-    video_files = [
+    # Count media files (video + photo)
+    media_files = [
         f for f in os.listdir(args.source_dir)
-        if os.path.splitext(f)[1].lower() in VIDEO_EXT
+        if os.path.splitext(f)[1].lower() in MEDIA_EXT
     ]
-    logger.info("Found %d video files to upload from %s", len(video_files), args.source_dir)
+    logger.info("Found %d media files to upload from %s", len(media_files), args.source_dir)
 
-    if not video_files:
+    if not media_files:
         logger.info("Nothing to upload.")
         return
 

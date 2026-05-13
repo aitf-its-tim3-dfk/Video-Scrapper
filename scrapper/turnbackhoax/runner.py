@@ -428,13 +428,9 @@ async def scrape_pages_and_download(config: ScrapeConfig) -> None:
         save_checkpoint(ckpt_path, state)
 
     # ── Post-scrape: export CSVs and final report ─────────────────────
-    if not state.found_videos:
-        logger.info("No video URLs found across pages.")
-        return
-
     logger.info("Total unique video URLs found: %d", len(state.found_videos))
 
-    # Write CSVs
+    # Always write CSVs (even if empty) so artifacts are always uploaded
     os.makedirs(config.download_dir, exist_ok=True)
     write_video_index(config.download_dir, state.found_videos)
     write_extracted_videos(config.download_dir, state.found_videos)

@@ -101,13 +101,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Disable smart cookies (always send cookies on every request)")
 
     # Delays
-    p.add_argument("--min-delay-page", type=float, default=2.0,
+    p.add_argument("--min-delay-page", type=float, default=1.0,
                    help="Min delay between article requests")
-    p.add_argument("--max-delay-page", type=float, default=4.0,
+    p.add_argument("--max-delay-page", type=float, default=2.0,
                    help="Max delay between article requests")
-    p.add_argument("--min-delay-dl", type=float, default=5.0,
+    p.add_argument("--min-delay-dl", type=float, default=1.0,
                    help="Min delay between downloads")
-    p.add_argument("--max-delay-dl", type=float, default=10.0,
+    p.add_argument("--max-delay-dl", type=float, default=4.0,
                    help="Max delay between downloads")
 
     # Filtering
@@ -129,7 +129,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                    help="Scrapling fetcher mode: http (fast), dynamic (JS rendering), stealth (anti-bot)")
     p.add_argument("--concurrency", type=int, default=5,
                    help="Max concurrent article fetches")
-    p.add_argument("--download-concurrency", type=int, default=2,
+    p.add_argument("--download-concurrency", type=int, default=4,
                    help="Max concurrent yt-dlp download processes")
     p.add_argument("--user-agent",
                    default="Mozilla/5.0 (compatible; scraper/1.0; +https://example.com)")

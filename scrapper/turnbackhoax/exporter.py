@@ -83,9 +83,6 @@ def write_extracted_videos(
 ) -> str:
     """Write the extracted (probe-OK) videos CSV.  Returns the output path."""
     extracted = [v for v in videos if not v.get("probe_error")]
-    if not extracted:
-        logger.info("No extracted videos to write.")
-        return ""
     path = os.path.join(download_dir, filename)
     rows = [
         [
@@ -123,9 +120,6 @@ def write_skipped_items(
     filename: str = "skipped_items.csv",
 ) -> str:
     """Write the skipped-items CSV.  Returns the output path."""
-    if not skipped:
-        logger.info("No skipped items to write.")
-        return ""
     path = os.path.join(download_dir, filename)
     rows = [
         [
@@ -165,12 +159,10 @@ def write_downloaded_videos(
         # Check if the video file exists in the download directory
         video_path = os.path.join(download_dir, video_name)
         if os.path.isfile(video_path):
-            # Verify it's actually a video file by checking extension
             ext = os.path.splitext(video_name)[1].lower()
-            if ext in [".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".ts"]:
+            if ext in {".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv", ".m4v", ".ts",
+                       ".jpg", ".jpeg", ".png", ".webp"}:
                 downloaded.append(v)
-            else:
-                logger.debug("Skipping non-video file: %s", video_name)
         else:
             logger.debug("Video file not found on disk: %s", video_path)
     
